@@ -181,6 +181,7 @@ class Scratch3PenBlocks {
      */
     _onTargetMoved (target, oldX, oldY, isForce) {
         // Only move the pen if the movement isn't forced (ie. dragged).
+        console.log(target)
         if (!isForce) {
             const penSkinId = this._getPenLayerID();
             if (penSkinId >= 0) {

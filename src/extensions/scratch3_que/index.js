@@ -19,6 +19,11 @@ class Scratch3QueBlocks {
          * @type {Runtime}
          */
         this.runtime = runtime;
+        this.runtime.addListener('TASKSTART', (e) => this.handleTaskStart(e))
+        this.runtime.addListener('TASKSTOP', (e) => this.handleTaskStop(e))
+        this.taskStatusStart = false
+        this.taskStatusStop = false
+
     }
 
 
@@ -28,6 +33,13 @@ class Scratch3QueBlocks {
      */
     static get STATE_KEY () {
         return 'Scratch.helloWorld';
+    }
+
+    handleTaskStart(status) {
+        this.taskStatusStart= status
+    }
+    handleTaskStop(status) {
+        this.taskStatusStop = status
     }
 
     /**
@@ -69,11 +81,29 @@ class Scratch3QueBlocks {
                             type: ArgumentType.STRING,
                             defaultValue: formatMessage({
                                 id: 'helloWorld.defaultTextToSay',
-                                default: 'hello world',
+                                default: 'one',
                                 description: 'default text to say.'
                             })
                         }
                     }
+                },
+                {
+                    opcode: 'taskStart',
+                    blockType: BlockType.HAT,
+                    text: formatMessage({
+                        id: 'haoxueTask.taskStart',
+                        default: '开始任务',
+                        description: 'say something'
+                    })
+                },
+                {
+                    opcode: 'taskStop',
+                    blockType: BlockType.HAT,
+                    text: formatMessage({
+                        id: 'haoxueTask.taskStop',
+                        default: '复位任务',
+                        description: 'say something'
+                    })
                 }
             ],
             menus: {}
@@ -83,14 +113,30 @@ class Scratch3QueBlocks {
     taskDone(args, util) {
         //console.log(util)
         //console.log(this.runtime)
+        //this.runtime.emit('TASKSTOP', true);
         this.runtime.emit('TASKDONE', true)
     }
 
     taskStep (args, util) {
         const message = args.TEXT;
         //console.log(message);
-        //this.runtime.emit('SAY', util.target, 'say', message);
+        //this.runtime.emit('TASKSTART', true);
         this.runtime.emit('TASKSTEP', message)
+    }
+    
+    taskStart(args, util) {
+        if(this.taskStatusStart) {
+            this.taskStatusStart = false
+            return true
+        }
+        return false
+    }
+    taskStop(args, util) {
+        if(this.taskStatusStop) {
+            this.taskStatusStop = false
+            return true
+        }
+        return false
     }
 }
 
