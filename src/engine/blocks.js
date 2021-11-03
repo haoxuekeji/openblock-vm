@@ -669,7 +669,7 @@ class Blocks {
             let isSpriteLocalVariable = false;
             if (block.opcode === 'data_variable' && this.runtime.getTargetForStage()) {
                 isSpriteLocalVariable = !(this.runtime.getTargetForStage().variables[block.fields.VARIABLE.id]);
-            } else if (block.opcode === 'data_listcontents') {
+            } else if (block.opcode === 'data_listcontents' && this.runtime.getTargetForStage()) {
                 isSpriteLocalVariable = !(this.runtime.getTargetForStage().variables[block.fields.LIST.id]);
             }
 

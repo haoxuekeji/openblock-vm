@@ -1278,7 +1278,7 @@ const parseBlock = function (sb2block, addBroadcastMsg, getVariableId, extension
         // Assign correct opcode based on the block shape.
         switch (returnCode) {
         case 'r':
-            activeBlock.opcode = 'argument_reporter_string';
+            activeBlock.opcode = 'argument_reporter_string_number';
             break;
         case 'b':
             activeBlock.opcode = 'argument_reporter_boolean';

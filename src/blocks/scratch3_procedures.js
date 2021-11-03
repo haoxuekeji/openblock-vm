@@ -15,6 +15,7 @@ class Scratch3ProcedureBlocks {
         return {
             procedures_definition: this.definition,
             procedures_call: this.call,
+            argument_reporter_string_number: this.argumentReporterStringNumber,
             argument_reporter_number: this.argumentReporterNumber,
             argument_reporter_string: this.argumentReporterString,
             argument_reporter_boolean: this.argumentReporterBoolean
@@ -54,6 +55,16 @@ class Scratch3ProcedureBlocks {
             util.stackFrame.executed = true;
             util.startProcedure(procedureCode);
         }
+    }
+
+    argumentReporterStringNumber (args, util) {
+        const value = util.getParam(args.VALUE);
+        if (value === null) {
+            // When the parameter is not found in the most recent procedure
+            // call, the default is always 0.
+            return 0;
+        }
+        return value;
     }
 
     argumentReporterNumber (args, util) {

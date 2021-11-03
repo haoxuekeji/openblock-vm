@@ -4,9 +4,9 @@ const Serialport = require('../../io/serialport');
 const Base64Util = require('../../util/base64-util');
 
 /**
- * Manage communication with a Esp peripheral over a OpenBlock Link client socket.
+ * Manage communication with a Microbit peripheral over a OpenBlock Link client socket.
  */
-class EspPeripheral{
+class MicrobitPeripheral{
 
     /**
      * Construct a Arduino communication object.
@@ -69,8 +69,6 @@ class EspPeripheral{
      * Called by the runtime when user wants to upload realtime firmware to a peripheral.
      */
     uploadFirmware () {
-        this._stopHeartbeat();
-        this._serialport.uploadFirmware(this.diveceOpt);
     }
 
     /**
@@ -182,4 +180,4 @@ class EspPeripheral{
     }
 }
 
-module.exports = EspPeripheral;
+module.exports = MicrobitPeripheral;
