@@ -70,6 +70,17 @@ const ArgumentTypeMap = (() => {
             fieldName: 'COLOUR'
         }
     };
+    map[ArgumentType.HALF_ANGLE] = {
+        shadow: {
+            type: 'math_half_angle',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.IMAGE] = {
+        // Inline images are weird because they're not actually "arguments".
+        // They are more analagous to the label on a block.
+        fieldType: 'field_image'
+    };
     map[ArgumentType.NUMBER] = {
         shadow: {
             type: 'math_number',
@@ -97,6 +108,12 @@ const ArgumentTypeMap = (() => {
             fieldName: 'NOTE'
         }
     };
+    map[ArgumentType.OTO100_NUMBER] = {
+        shadow: {
+            type: 'math_0to100_number',
+            fieldName: 'NUM'
+        }
+    };
     map[ArgumentType.UINT8_NUMBER] = {
         shadow: {
             type: 'math_uint8_number',
@@ -108,11 +125,6 @@ const ArgumentTypeMap = (() => {
             type: 'math_uint10_number',
             fieldName: 'NUM'
         }
-    };
-    map[ArgumentType.IMAGE] = {
-        // Inline images are weird because they're not actually "arguments".
-        // They are more analagous to the label on a block.
-        fieldType: 'field_image'
     };
     return map;
 })();

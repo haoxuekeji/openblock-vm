@@ -4,7 +4,7 @@ const ArgumentType = require('../../extension-support/argument-type');
 const BlockType = require('../../extension-support/block-type');
 const ProgramModeType = require('../../extension-support/program-mode-type');
 
-const ArduinoPeripheral = require('../arduinoCommon/arduino-peripheral');
+const ArduinoPeripheral = require('../common/arduino-peripheral');
 
 /**
  * The list of USB device filters.
@@ -697,7 +697,7 @@ class OpenBlockArduinoUnoUltraDevice {
                                 defaultValue: Pins.D3
                             },
                             OUT: {
-                                type: ArgumentType.ANGLE,
+                                type: ArgumentType.HALF_ANGLE,
                                 defaultValue: '90'
                             }
                         }
@@ -898,7 +898,6 @@ class OpenBlockArduinoUnoUltraDevice {
                         },
                         programMode: [ProgramModeType.UPLOAD]
                     },
-                    '---',
                     {
                         opcode: 'dataConstrain',
                         text: formatMessage({
@@ -923,6 +922,7 @@ class OpenBlockArduinoUnoUltraDevice {
                         },
                         programMode: [ProgramModeType.UPLOAD]
                     },
+                    '---',
                     {
                         opcode: 'dataConvert',
                         text: formatMessage({

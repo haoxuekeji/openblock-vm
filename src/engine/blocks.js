@@ -332,7 +332,6 @@ class Blocks {
             for (let i = 0; i < newBlocks.length; i++) {
                 this.createBlock(newBlocks[i]);
             }
-            this.runtime.requestCodeUpdate();
             break;
         }
         case 'change':

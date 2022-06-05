@@ -9,7 +9,7 @@ const maybeFormatMessage = require('../util/maybe-format-message');
 const BlockType = require('./block-type');
 
 // Local resources server address
-const localResourcesServerUrl = 'http://127.0.0.1:20120/';
+const localResourcesServerUrl = 'https://127.0.0.1:20112/';
 
 // These extensions are currently built into the VM repository but should not be loaded at startup.
 // TODO: move these out into a separate repository?
@@ -37,6 +37,7 @@ const builtinExtensions = {
 
 const builtinDevices = {
     arduinoUno: () => require('../devices/arduinoUno'),
+    arduinoNano: () => require('../devices/arduinoNano'),
     arduinoUnoUltra: () => require('../devices/arduinoUnoUltra'), // Add A6, A7 pins some customized board
     arduinoLeonardo: () => require('../devices/arduinoLeonardo'),
     arduinoMega2560: () => require('../devices/arduinoMega2560'),

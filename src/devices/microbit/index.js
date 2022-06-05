@@ -3,7 +3,7 @@ const formatMessage = require('format-message');
 const ArgumentType = require('../../extension-support/argument-type');
 const BlockType = require('../../extension-support/block-type');
 
-const MicrobitPeripheral = require('../arduinoCommon/microbit-peripheral');
+const CommonPeripheral = require('../common/common-peripheral');
 
 /**
 * The list of USB device filters.
@@ -89,7 +89,7 @@ const Level = {
 /**
  * Manage communication with a Microbit peripheral over a OpenBlock Link client socket.
  */
-class Microbit extends MicrobitPeripheral{
+class Microbit extends CommonPeripheral{
     /**
      * Construct a Microbit communication object.
      * @param {Runtime} runtime - the OpenBlock runtime
@@ -972,8 +972,8 @@ class OpenBlockMicrobitDevice {
                 description: 'The name of the microbit device console category'
             }),
             color1: '#FF3399',
-            color2: '#FF3399',
-            color3: '#FF3399',
+            color2: '#CC297A',
+            color3: '#CC297A',
 
             blocks: [
                 {

@@ -1,8 +1,6 @@
 # openblock-vm
-![](https://img.shields.io/travis/com/openblockcc/openblock-vm) ![](https://img.shields.io/github/license/openblockcc/openblock-vm)
+[![Publish Npm Package](https://github.com/openblockcc/openblock-vm/actions/workflows/publish-npm-package.yml/badge.svg)](https://github.com/openblockcc/openblock-vm/actions/workflows/publish-npm-package.yml) ![](https://img.shields.io/github/license/openblockcc/openblock-vm)
 
 ## Getting Start
 
-Visit the wiki: [https://openblockcc.github.io/wiki/main](https://openblockcc.github.io/wiki/main)
-
-Visit the wiki on gitee (mirror): [https://openblockcc.gitee.io/wiki/main](https://openblockcc.gitee.io/wiki/main)
+Visit the wiki: https://wiki.openblock.cc

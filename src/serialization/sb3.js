@@ -556,6 +556,26 @@ const serialize = function (runtime, targetId) {
 
     obj.device = runtime.getCurrentDevice();
 
+    // If no device setting means this project is a pure scratch project, so we convert the procedures blocks which
+    // is not supported by scratch3 to the types supported by scratch3, so that scratch3 can open the pure scratch
+    // project created by openblock.
+    if (obj.device === null) {
+        obj.targets = obj.targets.map(target => {
+            target.blocks = Object.fromEntries(
+                Object.entries(target.blocks).map(([id, block]) => {
+                    if (block.opcode === 'procedures_prototype' || block.opcode === 'procedures_call') {
+                        block.mutation.proccode = block.mutation.proccode.replace(/%n/g, '%s');
+                    }
+                    if (block.opcode === 'argument_reporter_number' || block.opcode === 'argument_reporter_string') {
+                        block.opcode = 'argument_reporter_string_number';
+                    }
+                    return [id, block];
+                })
+            );
+            return target;
+        });
+    }
+
     obj.deviceType = runtime.getCurrentDeviceType();
 
     obj.pnpIdList = runtime.getPnpIdList();

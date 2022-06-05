@@ -467,7 +467,7 @@ class VirtualMachine extends EventEmitter {
 
         return zip.generateAsync({
             type: 'blob',
-            mimeType: 'application/x.scratch.sb3',
+            mimeType: 'application/x.openblock.ob',
             compression: 'DEFLATE',
             compressionOptions: {
                 level: 6 // Tradeoff between best speed (1) and best compression (9)
@@ -518,7 +518,7 @@ class VirtualMachine extends EventEmitter {
 
         return zip.generateAsync({
             type: typeof optZipType === 'string' ? optZipType : 'blob',
-            mimeType: 'application/x.scratch.sprite3',
+            mimeType: 'application/x.openblock.sprite3',
             compression: 'DEFLATE',
             compressionOptions: {
                 level: 6
@@ -557,6 +557,9 @@ class VirtualMachine extends EventEmitter {
         // Clear the current runtime
         this.clear();
 
+        if (typeof performance !== 'undefined') {
+            performance.mark('scratch-vm-deserialize-start');
+        }
         const runtime = this.runtime;
         const deserializePromise = function () {
             const projectVersion = projectJSON.projectVersion;
@@ -572,8 +575,15 @@ class VirtualMachine extends EventEmitter {
         };
         return deserializePromise()
             // Step1: Install device first.
-            .then(({targets}) => this.installDevice(targets, projectJSON.device, projectJSON.deviceType,
-                projectJSON.pnpIdList, projectJSON.programMode, projectJSON.deviceExtensions))
+            .then(({targets}) => {
+                if (typeof performance !== 'undefined') {
+                    performance.mark('scratch-vm-deserialize-end');
+                    performance.measure('scratch-vm-deserialize',
+                        'scratch-vm-deserialize-start', 'scratch-vm-deserialize-end');
+                }
+                return this.installDevice(targets, projectJSON.device, projectJSON.deviceType,
+                    projectJSON.pnpIdList, projectJSON.programMode, projectJSON.deviceExtensions);
+            })
             // Step2: Install target and if there has deivce setting, set the editing target to stage incase there is
             // device extensions block in sprite workspace, it will cause error.
             .then(targets => this.installTargets(targets, projectJSON.extensions, true, !!projectJSON.device))
