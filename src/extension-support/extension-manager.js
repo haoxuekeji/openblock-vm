@@ -9,7 +9,7 @@ const maybeFormatMessage = require('../util/maybe-format-message');
 const BlockType = require('./block-type');
 
 // Local resources server address
-const localResourcesServerUrl = 'https://127.0.0.1:20112/';
+const localResourcesServerUrl = 'https://device-manager.haoxuekeji.com:20112/';
 
 // These extensions are currently built into the VM repository but should not be loaded at startup.
 // TODO: move these out into a separate repository?
