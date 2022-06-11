@@ -675,6 +675,30 @@ class OpenBlockArduinoUnoDevice {
                 }
             },
             {
+                id: 'system',
+                name: formatMessage({
+                    id: 'arduinoUno.category.system',
+                    default: 'System',
+                    description: 'The name of the arduino uno device system category'
+                }),
+                color1: '#4C97FF',
+                color2: '#3373CC',
+                color3: '#3373CC',
+
+                blocks: [
+                    {
+                        opcode: 'getSystemTime',
+                        text: formatMessage({
+                            id: 'arduinoUno.system.getSystemTime',
+                            default: 'get system run time(ms)',
+                            description: 'arduinoUno get system run time'
+                        }),
+                        blockType: BlockType.REPORTER,
+                        programMode: [ProgramModeType.UPLOAD]
+                    }
+                ]
+            },
+            {
                 id: 'serial',
                 name: formatMessage({
                     id: 'arduinoUno.category.serial',
