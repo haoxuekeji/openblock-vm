@@ -27,13 +27,12 @@ class ScratchLinkWebSocket {
         case 'BLE':
             //this._ws = new WebSocket('ws://127.0.0.1:20111/scratch/ble');
             this._ws = new WebSocket('wss://device-manager.scratch.mit.edu:20110/scratch/ble');
-            //this._ws = new WebSocket('wss://device-manager.haoxuekeji.com:20111/openblock/ble');
             break;
         case 'BT':
-            this._ws = new WebSocket('wss://device-manager.haoxuekeji.com:20111/openblock/bt');
+            this._ws = new WebSocket('wss://127.0.0.1:20111/openblock/bt');
             break;
         case 'SERIALPORT':
-            this._ws = new WebSocket('wss://device-manager.haoxuekeji.com:20111/openblock/serialport');
+            this._ws = new WebSocket('wss://127.0.0.1:20111/openblock/serialport');
             break;
         default:
             throw new Error(`Unknown OpenblockLink socket Type: ${this._type}`);
