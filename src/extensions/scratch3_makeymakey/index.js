@@ -109,6 +109,13 @@ class Scratch3MakeyMakeyBlocks {
         this.keyPressBuffer = [];
     }
 
+    /**
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'makeymakey';
+    }
+
     /*
     * Localized short-form names of the space bar and arrow keys, for use in the
     * displayed menu items of the "when keys pressed in order" block.
@@ -168,7 +175,7 @@ class Scratch3MakeyMakeyBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: 'makeymakey',
             name: 'Makey Makey',
             blockIconURI: blockIconURI,
@@ -263,7 +270,7 @@ class Scratch3MakeyMakeyBlocks {
                     items: this.buildSequenceMenu(this.DEFAULT_SEQUENCES)
                 }
             }
-        };
+        }];
     }
 
     /*

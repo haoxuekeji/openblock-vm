@@ -172,6 +172,17 @@ class Serialport extends JSONRPC {
     }
 
     /**
+     * abort the uploading process.
+     * @return {Promise} - a promise from the remote send request.
+     */
+    abortUpload () {
+        return this.sendRemoteRequest('abortUpload')
+            .catch(e => {
+                this.handleDisconnectError(e);
+            });
+    }
+
+    /**
      * Handle a received call from the socket.
      * @param {string} method - a received method label.
      * @param {object} params - a received list of parameters.
@@ -189,6 +200,11 @@ class Serialport extends JSONRPC {
                 window.clearTimeout(this._discoverTimeoutID);
             }
             break;
+        case 'connectError':
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+                message: params.message
+            });
+            break;
         case 'peripheralUnplug':
             this.handleDisconnectError();
             break;
@@ -203,6 +219,10 @@ class Serialport extends JSONRPC {
                     message: params.message
                 });
             break;
+        case 'setUploadAbortEnabled':
+            this._runtime.emit(
+                this._runtime.constructor.PERIPHERAL_SET_UPLOAD_ABORT_ENABLED, params);
+            break;
         case 'uploadError':
             this._runtime.emit(
                 this._runtime.constructor.PERIPHERAL_UPLOAD_ERROR, {
@@ -211,7 +231,7 @@ class Serialport extends JSONRPC {
             break;
         case 'uploadSuccess':
             this._runtime.emit(
-                this._runtime.constructor.PERIPHERAL_UPLOAD_SUCCESS);
+                this._runtime.constructor.PERIPHERAL_UPLOAD_SUCCESS, params ? params.aborted : false);
             break;
         case 'ping':
             return 42;

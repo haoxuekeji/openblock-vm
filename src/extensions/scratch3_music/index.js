@@ -167,6 +167,13 @@ class Scratch3MusicBlocks {
     }
 
     /**
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'music';
+    }
+
+    /**
      * An array of info about each drum.
      * @type {object[]}
      * @param {string} name - the translatable name to display in the drums menu.
@@ -753,7 +760,7 @@ class Scratch3MusicBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: 'music',
             name: formatMessage({
                 id: 'music.categoryName',
@@ -920,7 +927,7 @@ class Scratch3MusicBlocks {
                     items: this._buildMenu(this.INSTRUMENT_INFO)
                 }
             }
-        };
+        }];
     }
 
     /**

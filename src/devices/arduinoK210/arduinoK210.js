@@ -12,11 +12,7 @@ const CommonPeripheral = require('../common/common-peripheral');
  */
 const PNPID_LIST = [
     // CH340
-    'USB\\VID_1A86&PID_7523',
-    // CH9102
-    'USB\\VID_1A86&PID_55D4',
-    // CP2102
-    'USB\\VID_10C4&PID_EA60'
+    'USB\\VID_1A86&PID_7523'
 ];
 
 /**
@@ -24,9 +20,11 @@ const PNPID_LIST = [
  * @readonly
  */
 const SERIAL_CONFIG = {
-    baudRate: 57600,
+    baudRate: 115200,
     dataBits: 8,
-    stopBits: 1
+    stopBits: 1,
+    dtr: false,
+    rts: false
 };
 
 /**
@@ -35,7 +33,7 @@ const SERIAL_CONFIG = {
  */
 const DIVECE_OPT = {
     type: 'arduino',
-    fqbn: 'esp32:esp32:esp32:UploadSpeed=921600'
+    fqbn: 'Maixduino:k210:m1:toolsloc=default,clksrc=400,burn_baudrate=2000000,burn_tool_firmware=dan'
 };
 
 const Pins = {
@@ -59,18 +57,34 @@ const Pins = {
     IO17: '17',
     IO18: '18',
     IO19: '19',
+    IO20: '20',
     IO21: '21',
     IO22: '22',
     IO23: '23',
+    IO24: '24',
     IO25: '25',
     IO26: '26',
     IO27: '27',
+    IO28: '28',
+    IO29: '29',
+    IO30: '30',
+    IO31: '31',
     IO32: '32',
     IO33: '33',
     IO34: '34',
     IO35: '35',
     IO36: '36',
-    IO39: '39'
+    IO37: '37',
+    IO38: '38',
+    IO39: '39',
+    IO40: '40',
+    IO41: '41',
+    IO42: '42',
+    IO43: '43',
+    IO44: '44',
+    IO45: '45',
+    IO46: '46',
+    IO47: '47'
 };
 
 const Level = {
@@ -78,29 +92,11 @@ const Level = {
     Low: 'LOW'
 };
 
-const Channels = {
-    CH0: '0',
-    CH1: '1',
-    CH2: '2',
-    CH3: '3',
-    CH4: '4',
-    CH5: '5',
-    CH6: '6',
-    CH7: '7',
-    CH8: '8',
-    CH9: '9',
-    CH10: '10',
-    CH11: '11',
-    CH12: '12',
-    CH13: '13',
-    CH14: '14',
-    CH15: '15'
-};
-
 const SerialNo = {
     Serial0: '0',
     Serial1: '1',
-    Serial2: '2'
+    Serial2: '2',
+    Serial3: '3'
 };
 
 const Buadrate = {
@@ -140,9 +136,9 @@ const DataType = {
 };
 
 /**
- * Manage communication with a Arduino esp32 peripheral over a OpenBlock Link client socket.
+ * Manage communication with a Arduino K210 peripheral over a OpenBlock Link client socket.
  */
-class ArduinoEsp32 extends CommonPeripheral{
+class ArduinoK210 extends CommonPeripheral{
     /**
      * Construct a Arduino communication object.
      * @param {Runtime} runtime - the OpenBlock runtime
@@ -155,14 +151,14 @@ class ArduinoEsp32 extends CommonPeripheral{
 }
 
 /**
- * OpenBlock blocks to interact with a Arduino esp32 peripheral.
+ * OpenBlock blocks to interact with a Arduino K210 peripheral.
  */
-class OpenBlockArduinoEsp32Device {
+class OpenBlockArduinoK210Device {
     /**
      * @return {string} - the ID of this extension.
      */
-    static get DEVICE_ID () {
-        return 'arduinoEsp32';
+    get DEVICE_ID () {
+        return 'arduinoK210';
     }
 
     get PINS_MENU () {
@@ -191,31 +187,30 @@ class OpenBlockArduinoEsp32Device {
                 text: 'IO5',
                 value: Pins.IO5
             },
-            // Pins 6 to 11 are used by the ESP32 Flash, not recommended for general use.
-            // {
-            //     text: 'IO6',
-            //     value: Pins.IO6
-            // },
-            // {
-            //     text: 'IO7',
-            //     value: Pins.IO7
-            // },
-            // {
-            //     text: 'IO8',
-            //     value: Pins.IO8
-            // },
-            // {
-            //     text: 'IO9',
-            //     value: Pins.IO9
-            // },
-            // {
-            //     text: 'IO10',
-            //     value: Pins.IO10
-            // },
-            // {
-            //     text: 'IO11',
-            //     value: Pins.IO11
-            // },
+            {
+                text: 'IO6',
+                value: Pins.IO6
+            },
+            {
+                text: 'IO7',
+                value: Pins.IO7
+            },
+            {
+                text: 'IO8',
+                value: Pins.IO8
+            },
+            {
+                text: 'IO9',
+                value: Pins.IO9
+            },
+            {
+                text: 'IO10',
+                value: Pins.IO10
+            },
+            {
+                text: 'IO11',
+                value: Pins.IO11
+            },
             {
                 text: 'IO12',
                 value: Pins.IO12
@@ -249,6 +244,10 @@ class OpenBlockArduinoEsp32Device {
                 value: Pins.IO19
             },
             {
+                text: 'IO20',
+                value: Pins.IO20
+            },
+            {
                 text: 'IO21',
                 value: Pins.IO21
             },
@@ -261,6 +260,10 @@ class OpenBlockArduinoEsp32Device {
                 value: Pins.IO23
             },
             {
+                text: 'IO24',
+                value: Pins.IO24
+            },
+            {
                 text: 'IO25',
                 value: Pins.IO25
             },
@@ -271,6 +274,22 @@ class OpenBlockArduinoEsp32Device {
             {
                 text: 'IO27',
                 value: Pins.IO27
+            },
+            {
+                text: 'IO28',
+                value: Pins.IO28
+            },
+            {
+                text: 'IO29',
+                value: Pins.IO29
+            },
+            {
+                text: 'IO30',
+                value: Pins.IO30
+            },
+            {
+                text: 'IO31',
+                value: Pins.IO31
             },
             {
                 text: 'IO32',
@@ -293,135 +312,62 @@ class OpenBlockArduinoEsp32Device {
                 value: Pins.IO36
             },
             {
+                text: 'IO37',
+                value: Pins.IO37
+            },
+            {
+                text: 'IO38',
+                value: Pins.IO38
+            },
+            {
                 text: 'IO39',
                 value: Pins.IO39
+            },
+            {
+                text: 'IO40',
+                value: Pins.IO40
+            },
+            {
+                text: 'IO41',
+                value: Pins.IO41
+            },
+            {
+                text: 'IO42',
+                value: Pins.IO42
             }
+            // Used by on board peripherals
+            // {
+            //     text: 'IO43',
+            //     value: Pins.IO43
+            // },
+            // {
+            //     text: 'IO44',
+            //     value: Pins.IO44
+            // },
+            // {
+            //     text: 'IO45',
+            //     value: Pins.IO45
+            // },
+            // {
+            //     text: 'IO46',
+            //     value: Pins.IO46
+            // },
+            // {
+            //     text: 'IO47',
+            //     value: Pins.IO47
+            // }
         ];
     }
 
-    get OUT_PINS_MENU () {
-        return [
-            {
-                text: 'IO0',
-                value: Pins.IO0
-            },
-            {
-                text: 'IO1',
-                value: Pins.IO1
-            },
-            {
-                text: 'IO2',
-                value: Pins.IO2
-            },
-            {
-                text: 'IO3',
-                value: Pins.IO3
-            },
-            {
-                text: 'IO4',
-                value: Pins.IO4
-            },
-            {
-                text: 'IO5',
-                value: Pins.IO5
-            },
-            // Pins 6 to 11 are used by the ESP32 Flash, not recommended for general use.
-            // {
-            //     text: 'IO6',
-            //     value: Pins.IO6
-            // },
-            // {
-            //     text: 'IO7',
-            //     value: Pins.IO7
-            // },
-            // {
-            //     text: 'IO8',
-            //     value: Pins.IO8
-            // },
-            // {
-            //     text: 'IO9',
-            //     value: Pins.IO9
-            // },
-            // {
-            //     text: 'IO10',
-            //     value: Pins.IO10
-            // },
-            // {
-            //     text: 'IO11',
-            //     value: Pins.IO11
-            // },
-            {
-                text: 'IO12',
-                value: Pins.IO12
-            },
-            {
-                text: 'IO13',
-                value: Pins.IO13
-            },
-            {
-                text: 'IO14',
-                value: Pins.IO14
-            },
-            {
-                text: 'IO15',
-                value: Pins.IO15
-            },
-            {
-                text: 'IO16',
-                value: Pins.IO16
-            },
-            {
-                text: 'IO17',
-                value: Pins.IO17
-            },
-            {
-                text: 'IO18',
-                value: Pins.IO18
-            },
-            {
-                text: 'IO19',
-                value: Pins.IO19
-            },
-            {
-                text: 'IO21',
-                value: Pins.IO21
-            },
-            {
-                text: 'IO22',
-                value: Pins.IO22
-            },
-            {
-                text: 'IO23',
-                value: Pins.IO23
-            },
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            }
-        ];
+    get DEFAULT_PIN () {
+        return Pins.IO8;
     }
 
     get MODE_MENU () {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.input',
+                    id: 'arduinoK210.modeMenu.input',
                     default: 'input',
                     description: 'label for input pin mode'
                 }),
@@ -429,7 +375,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.output',
+                    id: 'arduinoK210.modeMenu.output',
                     default: 'output',
                     description: 'label for output pin mode'
                 }),
@@ -437,7 +383,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.inputPullup',
+                    id: 'arduinoK210.modeMenu.inputPullup',
                     default: 'input-pullup',
                     description: 'label for input-pullup pin mode'
                 }),
@@ -445,7 +391,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.inputPulldown',
+                    id: 'arduinoK210.modeMenu.inputPulldown',
                     default: 'input-pulldown',
                     description: 'label for input-pulldown pin mode'
                 }),
@@ -454,80 +400,11 @@ class OpenBlockArduinoEsp32Device {
         ];
     }
 
-    get ANALOG_PINS_MENU () {
-        return [
-            {
-                text: 'IO0',
-                value: Pins.IO0
-            },
-            {
-                text: 'IO2',
-                value: Pins.IO2
-            },
-            {
-                text: 'IO4',
-                value: Pins.IO4
-            },
-            {
-                text: 'IO12',
-                value: Pins.IO12
-            },
-            {
-                text: 'IO13',
-                value: Pins.IO13
-            },
-            {
-                text: 'IO14',
-                value: Pins.IO14
-            },
-            {
-                text: 'IO15',
-                value: Pins.IO15
-            },
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            },
-            {
-                text: 'IO34',
-                value: Pins.IO34
-            },
-            {
-                text: 'IO35',
-                value: Pins.IO35
-            },
-            {
-                text: 'IO36',
-                value: Pins.IO36
-            },
-            {
-                text: 'IO39',
-                value: Pins.IO39
-            }
-        ];
-    }
-
     get LEVEL_MENU () {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.levelMenu.high',
+                    id: 'arduinoK210.levelMenu.high',
                     default: 'high',
                     description: 'label for high level'
                 }),
@@ -535,7 +412,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.levelMenu.low',
+                    id: 'arduinoK210.levelMenu.low',
                     default: 'low',
                     description: 'label for low level'
                 }),
@@ -544,138 +421,11 @@ class OpenBlockArduinoEsp32Device {
         ];
     }
 
-    get LEDC_CHANNELS_MENU () {
-        return [
-            {
-                text: 'CH0 (LT0)',
-                value: Channels.CH0
-            },
-            {
-                text: 'CH1 (LT0)',
-                value: Channels.CH1
-            },
-            {
-                text: 'CH2 (LT1)',
-                value: Channels.CH2
-            },
-            {
-                text: 'CH3 (LT1)',
-                value: Channels.CH3
-            },
-            {
-                text: 'CH4 (LT2)',
-                value: Channels.CH4
-            },
-            {
-                text: 'CH5 (LT2)',
-                value: Channels.CH5
-            },
-            {
-                text: 'CH6 (LT3)',
-                value: Channels.CH6
-            },
-            {
-                text: 'CH7 (LT3)',
-                value: Channels.CH7
-            },
-            {
-                text: 'CH8 (HT0)',
-                value: Channels.CH8
-            },
-            {
-                text: 'CH9 (HT0)',
-                value: Channels.CH9
-            },
-            {
-                text: 'CH10 (HT1)',
-                value: Channels.CH10
-            },
-            {
-                text: 'CH11 (HT1)',
-                value: Channels.CH11
-            },
-            {
-                text: 'CH12 (HT2)',
-                value: Channels.CH12
-            },
-            {
-                text: 'CH13 (HT2)',
-                value: Channels.CH13
-            },
-            {
-                text: 'CH14 (HT3)',
-                value: Channels.CH14
-            },
-            {
-                text: 'CH15 (HT3)',
-                value: Channels.CH15
-            }
-        ];
-    }
-
-    get DAC_PINS_MENU () {
-        return [
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            }
-        ];
-    }
-
-    get TOUCH_PINS_MENU () {
-        return [
-            {
-                text: 'IO0',
-                value: Pins.IO0
-            },
-            {
-                text: 'IO2',
-                value: Pins.IO2
-            },
-            {
-                text: 'IO4',
-                value: Pins.IO4
-            },
-            {
-                text: 'IO12',
-                value: Pins.IO12
-            },
-            {
-                text: 'IO13',
-                value: Pins.IO13
-            },
-            {
-                text: 'IO14',
-                value: Pins.IO14
-            },
-            {
-                text: 'IO15',
-                value: Pins.IO15
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            }
-        ];
-    }
-
     get INTERRUP_MODE_MENU () {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.risingEdge',
+                    id: 'arduinoK210.InterrupModeMenu.risingEdge',
                     default: 'rising edge',
                     description: 'label for rising edge interrup'
                 }),
@@ -683,7 +433,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.fallingEdge',
+                    id: 'arduinoK210.InterrupModeMenu.fallingEdge',
                     default: 'falling edge',
                     description: 'label for falling edge interrup'
                 }),
@@ -691,7 +441,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.changeEdge',
+                    id: 'arduinoK210.InterrupModeMenu.changeEdge',
                     default: 'change edge',
                     description: 'label for change edge interrup'
                 }),
@@ -699,7 +449,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.low',
+                    id: 'arduinoK210.InterrupModeMenu.low',
                     default: 'low level',
                     description: 'label for low level interrup'
                 }),
@@ -707,7 +457,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.high',
+                    id: 'arduinoK210.InterrupModeMenu.high',
                     default: 'high level',
                     description: 'label for high level interrup'
                 }),
@@ -722,16 +472,27 @@ class OpenBlockArduinoEsp32Device {
                 text: '0',
                 value: SerialNo.Serial0
             },
-            // Usually IO9/10 is reserved for flash chip.
-            // {
-            //     text: '1',
-            //     value: SerialNo.Serial1
-            // },
+            {
+                text: '1',
+                value: SerialNo.Serial1
+            },
             {
                 text: '2',
                 value: SerialNo.Serial2
+            },
+            {
+                text: '3',
+                value: SerialNo.Serial3
             }
         ];
+    }
+
+    get DEFAULT_SERIAL_RX_PIN () {
+        return Pins.IO4;
+    }
+
+    get DEFAULT_SERIAL_TX_PIN () {
+        return Pins.IO5;
     }
 
     get BAUDTATE_MENU () {
@@ -771,7 +532,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.eolMenu.warp',
+                    id: 'arduinoK210.eolMenu.warp',
                     default: 'warp',
                     description: 'label for warp print'
                 }),
@@ -779,7 +540,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.eolMenu.noWarp',
+                    id: 'arduinoK210.eolMenu.noWarp',
                     default: 'no-warp',
                     description: 'label for no warp print'
                 }),
@@ -792,7 +553,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.integer',
+                    id: 'arduinoK210.dataTypeMenu.integer',
                     default: 'integer',
                     description: 'label for integer'
                 }),
@@ -800,7 +561,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.decimal',
+                    id: 'arduinoK210.dataTypeMenu.decimal',
                     default: 'decimal',
                     description: 'label for decimal number'
                 }),
@@ -808,7 +569,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.string',
+                    id: 'arduinoK210.dataTypeMenu.string',
                     default: 'string',
                     description: 'label for string'
                 }),
@@ -829,9 +590,8 @@ class OpenBlockArduinoEsp32Device {
          */
         this.runtime = runtime;
 
-        // Create a new Arduino esp32 peripheral instance
-        this._peripheral = new ArduinoEsp32(this.runtime,
-            OpenBlockArduinoEsp32Device.DEVICE_ID, originalDeviceId);
+        // Create a new Arduino K210 peripheral instance
+        this._peripheral = new ArduinoK210(this.runtime, this.DEVICE_ID, originalDeviceId);
     }
 
     /**
@@ -842,7 +602,7 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'pin',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.pins',
+                    id: 'arduinoK210.category.pins',
                     default: 'Pins',
                     description: 'The name of the esp32 arduino device pin category'
                 }),
@@ -854,16 +614,16 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'setPinMode',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.setPinMode',
+                            id: 'arduinoK210.pins.setPinMode',
                             default: 'set pin [PIN] mode [MODE]',
-                            description: 'arduinoEsp32 set pin mode'
+                            description: 'Arduino K210 set pin mode'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO2
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_PIN
                             },
                             MODE: {
                                 type: ArgumentType.STRING,
@@ -875,16 +635,16 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'setDigitalOutput',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.setDigitalOutput',
+                            id: 'arduinoK210.pins.setDigitalOutput',
                             default: 'set digital pin [PIN] out [LEVEL]',
-                            description: 'arduinoEsp32 set digital pin out'
+                            description: 'Arduino K210 set digital pin out'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO2
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_PIN
                             },
                             LEVEL: {
                                 type: ArgumentType.STRING,
@@ -894,48 +654,22 @@ class OpenBlockArduinoEsp32Device {
                         }
                     },
                     {
-                        opcode: 'esp32SetPwmOutput',
+                        opcode: 'k210SetPwmOutput',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32SetPwmOutput',
-                            default: 'set pwm pin [PIN] use channel [CH] out [OUT]',
-                            description: 'arduinoEsp32 set pwm pin out'
+                            id: 'arduinoK210.pins.setPwmOutput',
+                            default: 'set pwm pin [PIN] out [OUT]',
+                            description: 'Arduino K210 set pwm pin out'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO2
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_PIN
                             },
                             OUT: {
                                 type: ArgumentType.UINT8_NUMBER,
                                 defaultValue: '255'
-                            },
-                            CH: {
-                                type: ArgumentType.NUMBER,
-                                menu: 'ledcChannels',
-                                defaultValue: Channels.CH0
-                            }
-                        }
-                    },
-                    {
-
-                        opcode: 'esp32SetDACOutput',
-                        text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32SetDACOutput',
-                            default: 'set dac pin [PIN] out [OUT]',
-                            description: 'arduinoEsp32 set dac pin out'
-                        }),
-                        blockType: BlockType.COMMAND,
-                        arguments: {
-                            PIN: {
-                                type: ArgumentType.STRING,
-                                menu: 'dacPins',
-                                defaultValue: Pins.IO25
-                            },
-                            OUT: {
-                                type: ArgumentType.UINT8_NUMBER,
-                                defaultValue: '0'
                             }
                         }
                     },
@@ -943,93 +677,56 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'readDigitalPin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.readDigitalPin',
+                            id: 'arduinoK210.pins.readDigitalPin',
                             default: 'read digital pin [PIN]',
-                            description: 'arduinoEsp32 read digital pin'
+                            description: 'Arduino K210 read digital pin'
                         }),
                         blockType: BlockType.BOOLEAN,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO2
-                            }
-                        }
-                    },
-                    {
-                        opcode: 'readAnalogPin',
-                        text: formatMessage({
-                            id: 'arduinoEsp32.pins.readAnalogPin',
-                            default: 'read analog pin [PIN]',
-                            description: 'arduinoEsp32 read analog pin'
-                        }),
-                        blockType: BlockType.REPORTER,
-                        arguments: {
-                            PIN: {
-                                type: ArgumentType.STRING,
-                                menu: 'analogPins',
-                                defaultValue: Pins.IO2
-                            }
-                        }
-                    },
-                    {
-                        opcode: 'esp32ReadTouchPin',
-                        text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32ReadTouchPin',
-                            default: 'read touch pin [PIN]',
-                            description: 'arduinoEsp32 read touch pin'
-                        }),
-                        blockType: BlockType.REPORTER,
-                        arguments: {
-                            PIN: {
-                                type: ArgumentType.STRING,
-                                menu: 'touchPins',
-                                defaultValue: Pins.IO2
+                                defaultValue: this.DEFAULT_PIN
                             }
                         }
                     },
                     '---',
                     {
 
-                        opcode: 'esp32SetServoOutput',
+                        opcode: 'setServoOutput',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.setServoOutput',
-                            default: 'set servo pin [PIN] use channel [CH] out [OUT]',
-                            description: 'arduinoEsp32 set servo pin out'
+                            id: 'arduinoK210.pins.setServoOutput',
+                            default: 'set servo pin [PIN] out [OUT]',
+                            description: 'arduinoK210 set servo pin out'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO2
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_PIN
                             },
                             OUT: {
                                 type: ArgumentType.HALF_ANGLE,
                                 defaultValue: '90'
-                            },
-                            CH: {
-                                type: ArgumentType.NUMBER,
-                                menu: 'ledcChannels',
-                                defaultValue: Channels.CH0
                             }
                         }
                     },
                     '---',
                     {
 
-                        opcode: 'esp32AttachInterrupt',
+                        opcode: 'attachInterrupt',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32AttachInterrupt',
+                            id: 'arduinoK210.pins.attachInterrupt',
                             default: 'attach interrupt pin [PIN] mode [MODE] executes',
-                            description: 'arduinoEsp32 attach interrupt'
+                            description: 'arduinoK210 attach interrupt'
                         }),
                         blockType: BlockType.CONDITIONAL,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO2
+                                defaultValue: this.DEFAULT_PIN
                             },
                             MODE: {
                                 type: ArgumentType.STRING,
@@ -1040,19 +737,18 @@ class OpenBlockArduinoEsp32Device {
                         programMode: [ProgramModeType.UPLOAD]
                     },
                     {
-
-                        opcode: 'esp32DetachInterrupt',
+                        opcode: 'detachInterrupt',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32DetachInterrupt',
+                            id: 'arduinoK210.pins.detachInterrupt',
                             default: 'detach interrupt pin [PIN]',
-                            description: 'arduinoEsp32 detach interrupt'
+                            description: 'arduinoK210 detach interrupt'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO2
+                                defaultValue: this.DEFAULT_PIN
                             }
                         },
                         programMode: [ProgramModeType.UPLOAD]
@@ -1062,27 +758,12 @@ class OpenBlockArduinoEsp32Device {
                     pins: {
                         items: this.PINS_MENU
                     },
-                    outPins: {
-                        items: this.OUT_PINS_MENU
-                    },
                     mode: {
                         items: this.MODE_MENU
-                    },
-                    analogPins: {
-                        items: this.ANALOG_PINS_MENU
                     },
                     level: {
                         acceptReporters: true,
                         items: this.LEVEL_MENU
-                    },
-                    ledcChannels: {
-                        items: this.LEDC_CHANNELS_MENU
-                    },
-                    dacPins: {
-                        items: this.DAC_PINS_MENU
-                    },
-                    touchPins: {
-                        items: this.TOUCH_PINS_MENU
                     },
                     interruptMode: {
                         items: this.INTERRUP_MODE_MENU
@@ -1092,7 +773,7 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'serial',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.serial',
+                    id: 'arduinoK210.category.serial',
                     default: 'Serial',
                     description: 'The name of the arduino esp32 device serial category'
                 }),
@@ -1102,11 +783,11 @@ class OpenBlockArduinoEsp32Device {
 
                 blocks: [
                     {
-                        opcode: 'multiSerialBegin',
+                        opcode: 'k210MultiSerialBegin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialBegin',
-                            default: 'serial [NO] begin baudrate [VALUE]',
-                            description: 'arduinoEsp32 multi serial begin'
+                            id: 'arduinoK210.serial.multiSerialBegin',
+                            default: 'serial [NO] begin baudrate [BAUD] pin RX [RX_PIN] TX [TX_PIN]',
+                            description: 'arduinoK210 multi serial begin'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
@@ -1115,10 +796,20 @@ class OpenBlockArduinoEsp32Device {
                                 menu: 'serialNo',
                                 defaultValue: SerialNo.Serial0
                             },
-                            VALUE: {
+                            BAUD: {
                                 type: ArgumentType.STRING,
                                 menu: 'baudrate',
                                 defaultValue: Buadrate.B115200
+                            },
+                            RX_PIN: {
+                                type: ArgumentType.STRING,
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_SERIAL_RX_PIN
+                            },
+                            TX_PIN: {
+                                type: ArgumentType.STRING,
+                                menu: 'pins',
+                                defaultValue: this.DEFAULT_SERIAL_TX_PIN
                             }
                         },
                         programMode: [ProgramModeType.UPLOAD]
@@ -1126,9 +817,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialPrint',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialPrint',
+                            id: 'arduinoK210.serial.multiSerialPrint',
                             default: 'serial [NO] print [VALUE] [EOL]',
-                            description: 'arduinoEsp32 multi serial print'
+                            description: 'arduinoK210 multi serial print'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
@@ -1152,9 +843,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialAvailable',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialAvailable',
+                            id: 'arduinoK210.serial.multiSerialAvailable',
                             default: 'serial [NO] available data length',
-                            description: 'arduinoEsp32 multi serial available data length'
+                            description: 'arduinoK210 multi serial available data length'
                         }),
                         arguments: {
                             NO: {
@@ -1169,9 +860,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialReadAByte',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialReadAByte',
+                            id: 'arduinoK210.serial.multiSerialReadAByte',
                             default: 'serial [NO] read a byte',
-                            description: 'arduinoEsp32 multi serial read a byte'
+                            description: 'arduinoK210 multi serial read a byte'
                         }),
                         arguments: {
                             NO: {
@@ -1191,6 +882,9 @@ class OpenBlockArduinoEsp32Device {
                     serialNo: {
                         items: this.SERIAL_NO_MENU
                     },
+                    pins: {
+                        items: this.PINS_MENU
+                    },
                     eol: {
                         items: this.EOL_MENU
                     }
@@ -1199,7 +893,7 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'data',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.data',
+                    id: 'arduinoK210.category.data',
                     default: 'Data',
                     description: 'The name of the arduino esp32 device data category'
                 }),
@@ -1211,9 +905,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataMap',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataMap',
+                            id: 'arduinoK210.data.dataMap',
                             default: 'map [DATA] from ([ARG0], [ARG1]) to ([ARG2], [ARG3])',
-                            description: 'arduinoEsp32 data map'
+                            description: 'arduinoK210 data map'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1243,9 +937,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConstrain',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConstrain',
+                            id: 'arduinoK210.data.dataConstrain',
                             default: 'constrain [DATA] between ([ARG0], [ARG1])',
-                            description: 'arduinoEsp32 data constrain'
+                            description: 'arduinoK210 data constrain'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1268,9 +962,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvert',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvert',
+                            id: 'arduinoK210.data.dataConvert',
                             default: 'convert [DATA] to [TYPE]',
-                            description: 'arduinoEsp32 data convert'
+                            description: 'arduinoK210 data convert'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1289,9 +983,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvertASCIICharacter',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvertASCIICharacter',
+                            id: 'arduinoK210.data.dataConvertASCIICharacter',
                             default: 'convert [DATA] to ASCII character',
-                            description: 'arduinoEsp32 data convert to ASCII character'
+                            description: 'arduinoK210 data convert to ASCII character'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1305,9 +999,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvertASCIINumber',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvertASCIINumber',
+                            id: 'arduinoK210.data.dataConvertASCIINumber',
                             default: 'convert [DATA] to ASCII nubmer',
-                            description: 'arduinoEsp32 data convert to ASCII nubmer'
+                            description: 'arduinoK210 data convert to ASCII nubmer'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1387,4 +1081,4 @@ class OpenBlockArduinoEsp32Device {
     }
 }
 
-module.exports = OpenBlockArduinoEsp32Device;
+module.exports = OpenBlockArduinoK210Device;

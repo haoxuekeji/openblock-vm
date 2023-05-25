@@ -112,6 +112,13 @@ class Scratch3VideoSensingBlocks {
     }
 
     /**
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'videoSensing';
+    }
+
+    /**
      * After analyzing a frame the amount of milliseconds until another frame
      * is analyzed.
      * @type {number}
@@ -409,7 +416,7 @@ class Scratch3VideoSensingBlocks {
         }
 
         // Return extension definition
-        return {
+        return [{
             id: 'videoSensing',
             name: formatMessage({
                 id: 'videoSensing.categoryName',
@@ -501,7 +508,7 @@ class Scratch3VideoSensingBlocks {
                     items: this._buildMenu(this.VIDEO_STATE_INFO)
                 }
             }
-        };
+        }];
     }
 
     /**

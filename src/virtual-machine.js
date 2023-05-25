@@ -115,26 +115,23 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PROGRAM_MODE_UPDATE, data => {
             this.emit(Runtime.PROGRAM_MODE_UPDATE, data);
         });
-        this.runtime.on(Runtime.EXTENSION_ADDED, categoryInfo => {
-            this.emit(Runtime.EXTENSION_ADDED, categoryInfo);
+        this.runtime.on(Runtime.SCRATCH_EXTENSION_ADDED, extensionInfo => {
+            this.emit(Runtime.SCRATCH_EXTENSION_ADDED, extensionInfo);
         });
-        this.runtime.on(Runtime.EXTENSION_FIELD_ADDED, (fieldName, fieldImplementation) => {
-            this.emit(Runtime.EXTENSION_FIELD_ADDED, fieldName, fieldImplementation);
+        this.runtime.on(Runtime.SCRATCH_EXTENSION_FIELD_ADDED, (fieldName, fieldImplementation) => {
+            this.emit(Runtime.SCRATCH_EXTENSION_FIELD_ADDED, fieldName, fieldImplementation);
         });
-        this.runtime.on(Runtime.DEVICE_ADDED, (device, categoryInfoArray) => {
-            this.emit(Runtime.DEVICE_ADDED, device, categoryInfoArray);
+        this.runtime.on(Runtime.SCRATCH_EXTENSION_REMOVED, extensionInfo => {
+            this.emit(Runtime.SCRATCH_EXTENSION_REMOVED, extensionInfo);
         });
-        this.runtime.on(Runtime.DEVICE_FIELD_ADDED, (fieldName, fieldImplementation) => {
-            this.emit(Runtime.DEVICE_FIELD_ADDED, fieldName, fieldImplementation);
+        this.runtime.on(Runtime.DEVICE_EXTENSION_ADDED, deviceExtensionsRegister => {
+            this.emit(Runtime.DEVICE_EXTENSION_ADDED, deviceExtensionsRegister);
         });
-        this.runtime.on(Runtime.DEVICE_EXTENSION_ADDED, addExts => {
-            this.emit(Runtime.DEVICE_EXTENSION_ADDED, addExts);
+        this.runtime.on(Runtime.DEVICE_EXTENSION_REMOVED, () => {
+            this.emit(Runtime.DEVICE_EXTENSION_REMOVED);
         });
-        this.runtime.on(Runtime.DEVICE_EXTENSION_REMOVED, data => {
-            this.emit(Runtime.DEVICE_EXTENSION_REMOVED, data);
-        });
-        this.runtime.on(Runtime.BLOCKSINFO_UPDATE, categoryInfo => {
-            this.emit(Runtime.BLOCKSINFO_UPDATE, categoryInfo);
+        this.runtime.on(Runtime.BLOCKSINFO_UPDATE, extensionInfo => {
+            this.emit(Runtime.BLOCKSINFO_UPDATE, extensionInfo);
         });
         this.runtime.on(Runtime.BLOCKS_NEED_UPDATE, () => {
             this.emitWorkspaceUpdate();
@@ -154,8 +151,8 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_CONNECTED, () =>
             this.emit(Runtime.PERIPHERAL_CONNECTED)
         );
-        this.runtime.on(Runtime.PERIPHERAL_REQUEST_ERROR, () =>
-            this.emit(Runtime.PERIPHERAL_REQUEST_ERROR)
+        this.runtime.on(Runtime.PERIPHERAL_REQUEST_ERROR, info =>
+            this.emit(Runtime.PERIPHERAL_REQUEST_ERROR, info)
         );
         this.runtime.on(Runtime.PERIPHERAL_DISCONNECTED, () =>
             this.emit(Runtime.PERIPHERAL_DISCONNECTED)
@@ -178,11 +175,14 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_UPLOAD_STDOUT, info =>
             this.emit(Runtime.PERIPHERAL_UPLOAD_STDOUT, info)
         );
+        this.runtime.on(Runtime.PERIPHERAL_SET_UPLOAD_ABORT_ENABLED, enabled =>
+            this.emit(Runtime.PERIPHERAL_SET_UPLOAD_ABORT_ENABLED, enabled)
+        );
         this.runtime.on(Runtime.PERIPHERAL_UPLOAD_ERROR, info =>
             this.emit(Runtime.PERIPHERAL_UPLOAD_ERROR, info)
         );
-        this.runtime.on(Runtime.PERIPHERAL_UPLOAD_SUCCESS, () =>
-            this.emit(Runtime.PERIPHERAL_UPLOAD_SUCCESS)
+        this.runtime.on(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted =>
+            this.emit(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted)
         );
         this.runtime.on(Runtime.MIC_LISTENING, listening => {
             this.emit(Runtime.MIC_LISTENING, listening);
@@ -360,6 +360,15 @@ class VirtualMachine extends EventEmitter {
      */
     uploadToPeripheral (extensionId, code) {
         return this.runtime.uploadToPeripheral(extensionId, code);
+    }
+
+    /**
+     * Abort upload process.
+     * @param {string} extensionId - the id of the extension.
+     * @return {Function} Returns a function to aboart upload code to peripheral.
+     */
+    abortUploadToPeripheral (extensionId) {
+        return this.runtime.abortUploadToPeripheral(extensionId);
     }
 
     /**
@@ -586,7 +595,7 @@ class VirtualMachine extends EventEmitter {
             })
             // Step2: Install target and if there has deivce setting, set the editing target to stage incase there is
             // device extensions block in sprite workspace, it will cause error.
-            .then(targets => this.installTargets(targets, projectJSON.extensions, true, !!projectJSON.device))
+            .then(targets => this.installTargets(targets, projectJSON.extensions, true))
             // Step3: Install device extension. it can get flyout blocks because the toolbox has been updated in the
             // previous step. After loaded set the editing target to firset sprite if it has one.
             .then(targets => this.installDeviceExtensions(projectJSON.deviceExtensions, targets));
@@ -608,21 +617,12 @@ class VirtualMachine extends EventEmitter {
 
     /**
      * Update targets and workspace after installed device extensions
-     * @param {Array.<Target>} targets - the targets to be installed
      */
-    updateTargetsAndWorkspace (targets) {
-        if (targets) {
-            // After loaded all device extension. set the default target to first sprite.
-            if (targets.length > 1) {
-                this.editingTarget = targets[1];
-            } else {
-                this.editingTarget = targets[0];
-            }
-
-            this.emitTargetsUpdate(false /* Don't emit project change */);
-            this.emitWorkspaceUpdate();
-            this.runtime.setEditingTarget(this.editingTarget);
-        }
+    updateTargetsAndWorkspace () {
+        this.emitTargetsUpdate(false /* Don't emit project change */);
+        this.emitWorkspaceUpdate();
+        this.runtime.setEditingTarget(this.editingTarget);
+        this.runtime.ioDevices.cloud.setStage(this.runtime.getTargetForStage());
     }
 
     /**
@@ -631,9 +631,12 @@ class VirtualMachine extends EventEmitter {
      * @param {Array.<Target>} targets - the targets to be installed
      * @returns {Promise} Promise that resolves after all device extensions has loaded
      */
-    installDeviceExtensions (deviceExtensions, targets) {
-        if (!deviceExtensions) {
-            this.updateTargetsAndWorkspace(targets);
+    installDeviceExtensions (deviceExtensions, targets = null) {
+        if (!deviceExtensions || deviceExtensions.length === 0) {
+            // Check taget incase this fuc is called by gui.
+            if (targets) {
+                this.updateTargetsAndWorkspace(targets);
+            }
             return Promise.resolve();
         }
 
@@ -642,7 +645,10 @@ class VirtualMachine extends EventEmitter {
         return this.extensionManager.getDeviceExtensionsList()
             .then(() => this.installDeviceExtensionsSync())
             .then(() => {
-                this.updateTargetsAndWorkspace(targets);
+                // Check taget incase this fuc is called by gui.
+                if (targets) {
+                    this.updateTargetsAndWorkspace(targets);
+                }
             });
     }
 
@@ -672,10 +678,9 @@ class VirtualMachine extends EventEmitter {
      * @param {Array.<Target>} targets - the targets to be installed
      * @param {ImportedExtensionsInfo} extensions - metadata about extensions used by these targets
      * @param {boolean} wholeProject - set to true if installing a whole project, as opposed to a single sprite.
-     * @param {boolean} hasDevice - wether the project has device param
      * @returns {Promise} resolved once targets have been installed
      */
-    installTargets (targets, extensions, wholeProject, hasDevice) {
+    installTargets (targets, extensions, wholeProject) {
         const allPromises = [];
 
         if (extensions) {
@@ -712,8 +717,7 @@ class VirtualMachine extends EventEmitter {
             });
 
             // Select the first target for editing, e.g., the first sprite.
-            // If has device to be loaded, set stage as the editing target.
-            if (wholeProject && (targets.length > 1) && !hasDevice) {
+            if (wholeProject && (targets.length > 1)) {
                 this.editingTarget = targets[1];
             } else {
                 this.editingTarget = targets[0];
@@ -722,10 +726,6 @@ class VirtualMachine extends EventEmitter {
             if (!wholeProject) {
                 this.editingTarget.fixUpVariableReferences();
             }
-            this.emitTargetsUpdate(false /* Don't emit project change */);
-            this.emitWorkspaceUpdate();
-            this.runtime.setEditingTarget(this.editingTarget);
-            this.runtime.ioDevices.cloud.setStage(this.runtime.getTargetForStage());
 
             return targets;
         });

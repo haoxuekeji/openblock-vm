@@ -598,6 +598,13 @@ class Scratch3Speech2TextBlocks {
     }
 
     /**
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'speech2text';
+    }
+
+    /**
      * The key to load & store a target's speech-related state.
      * @type {string}
      */
@@ -609,7 +616,7 @@ class Scratch3Speech2TextBlocks {
      * @returns {object} Metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: 'speech2text',
             name: formatMessage({
                 id: 'speech.extensionName',
@@ -659,7 +666,7 @@ class Scratch3Speech2TextBlocks {
                     blockType: BlockType.REPORTER
                 }
             ]
-        };
+        }];
     }
 
     /**

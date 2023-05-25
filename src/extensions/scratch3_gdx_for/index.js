@@ -479,6 +479,12 @@ class Scratch3GdxForBlocks {
     /**
      * @return {string} - the ID of this extension.
      */
+    get EXTENSION_ID () {
+        return 'gdxfor';
+    }
+    /**
+     * @return {string} - the ID of this extension.
+     */
     static get EXTENSION_ID () {
         return 'gdxfor';
     }
@@ -628,7 +634,7 @@ class Scratch3GdxForBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: Scratch3GdxForBlocks.EXTENSION_ID,
             name: Scratch3GdxForBlocks.EXTENSION_NAME,
             blockIconURI: blockIconURI,
@@ -790,7 +796,7 @@ class Scratch3GdxForBlocks {
                     items: this.TILT_MENU_ANY
                 }
             }
-        };
+        }];
     }
 
     whenForcePushedOrPulled (args) {
