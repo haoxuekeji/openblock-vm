@@ -930,6 +930,13 @@ class Scratch3Ev3Blocks {
      * The ID of the extension.
      * @return {string} the id
      */
+    get EXTENSION_ID () {
+        return 'ev3';
+    }
+    /**
+     * The ID of the extension.
+     * @return {string} the id
+     */
     static get EXTENSION_ID () {
         return 'ev3';
     }
@@ -958,7 +965,7 @@ class Scratch3Ev3Blocks {
      * @return {object} Extension description.
      */
     getInfo () {
-        return {
+        return [{
             id: Scratch3Ev3Blocks.EXTENSION_ID,
             name: 'LEGO EV3',
             blockIconURI: blockIconURI,
@@ -1150,7 +1157,7 @@ class Scratch3Ev3Blocks {
                     items: this._formatMenu(Ev3SensorMenu)
                 }
             }
-        };
+        }];
     }
 
     motorTurnClockwise (args) {

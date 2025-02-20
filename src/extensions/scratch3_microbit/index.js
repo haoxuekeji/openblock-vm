@@ -82,7 +82,6 @@ class MicroBit {
          */
         this._ble = null;
         this._runtime.registerPeripheralExtension(extensionId, this);
-
         /**
          * The id of the extension this peripheral belongs to.
          */
@@ -417,6 +416,12 @@ class Scratch3MicroBitBlocks {
     /**
      * @return {string} - the ID of this extension.
      */
+    get EXTENSION_ID () {
+        return 'microbit';
+    }
+    /**
+     * @return {string} - the ID of this extension.
+     */
     static get EXTENSION_ID () {
         return 'microbit';
     }
@@ -575,7 +580,6 @@ class Scratch3MicroBitBlocks {
          * @type {Runtime}
          */
         this.runtime = runtime;
-
         // Create a new MicroBit peripheral instance
         this._peripheral = new MicroBit(this.runtime, Scratch3MicroBitBlocks.EXTENSION_ID);
     }
@@ -584,7 +588,7 @@ class Scratch3MicroBitBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: Scratch3MicroBitBlocks.EXTENSION_ID,
             name: Scratch3MicroBitBlocks.EXTENSION_NAME,
             blockIconURI: blockIconURI,
@@ -782,7 +786,7 @@ class Scratch3MicroBitBlocks {
                     items: ['0', '1', '2']
                 }
             }
-        };
+        }];
     }
 
     /**

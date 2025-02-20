@@ -26,7 +26,12 @@ class Scratch3QueBlocks {
 
     }
 
-
+        /**
+     * @return {string} - the ID of this extension.
+     */
+        get EXTENSION_ID () {
+            return 'que';
+        }
     /**
      * The key to load & store a target's pen-related state.
      * @type {string}
@@ -46,7 +51,7 @@ class Scratch3QueBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: 'que',
             name: formatMessage({
                 id: 'helloWorld.categoryName',
@@ -107,7 +112,7 @@ class Scratch3QueBlocks {
                 }
             ],
             menus: {}
-        };
+        }];
     }
 
     taskDone(args, util) {

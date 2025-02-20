@@ -252,10 +252,10 @@ class Runtime extends EventEmitter {
         this._isRealtimeMode = true;
 
         /**
-         * Currently selected device.
+         * Currently selected device's id.
          * @type {?Device}
          */
-        this._device = null;
+        this._deviceId = null;
 
         /**
          * Currently selected device type.
@@ -291,7 +291,7 @@ class Runtime extends EventEmitter {
          * Map of loaded extensions.
          * @type {Array.<string>}
          */
-        this._loadedExtensions = [];
+        this._loadedScratchExtensions = [];
 
         /**
          * Map to look up a block primitive's implementation function by its opcode.
@@ -683,32 +683,24 @@ class Runtime extends EventEmitter {
      * Event name for reporting that an extension was added.
      * @const {string}
      */
-    static get EXTENSION_ADDED () {
-        return 'EXTENSION_ADDED';
+    static get SCRATCH_EXTENSION_ADDED () {
+        return 'SCRATCH_EXTENSION_ADDED';
     }
 
     /**
      * Event name for reporting that an extension as asked for a custom field to be added
      * @const {string}
      */
-    static get EXTENSION_FIELD_ADDED () {
-        return 'EXTENSION_FIELD_ADDED';
+    static get SCRATCH_EXTENSION_FIELD_ADDED () {
+        return 'SCRATCH_EXTENSION_FIELD_ADDED';
     }
 
     /**
-     * Event name for reporting that an deivce was added.
+     * Event name for reporting that an deivce was removed.
      * @const {string}
      */
-    static get DEVICE_ADDED () {
-        return 'DEVICE_ADDED';
-    }
-
-    /**
-     * Event name for reporting that an device as asked for a custom field to be added
-     * @const {string}
-     */
-    static get DEVICE_FIELD_ADDED () {
-        return 'DEVICE_FIELD_ADDED';
+    static get SCRATCH_EXTENSION_REMOVED () {
+        return 'SCRATCH_EXTENSION_REMOVED';
     }
 
     /**
@@ -824,6 +816,15 @@ class Runtime extends EventEmitter {
      */
     static get PERIPHERAL_UPLOAD_STDOUT () {
         return 'PERIPHERAL_UPLOAD_STDOUT';
+    }
+
+    /**
+     * Event name for reporting whether peripheral is able to abort upload operations.
+     * This causes lock the abort button.
+     * @const {string}
+     */
+    static get PERIPHERAL_SET_UPLOAD_ABORT_ENABLED () {
+        return 'PERIPHERAL_SET_UPLOAD_ABORT_ENABLED';
     }
 
     /**
@@ -1020,10 +1021,6 @@ class Runtime extends EventEmitter {
      * @private
      */
     _makeExtensionMenuId (menuName, extensionId) {
-        const deviceType = this.getCurrentDeviceType();
-        if (deviceType) {
-            return `${deviceType}_${extensionId}_menu_${xmlEscape(menuName)}`;
-        }
         return `${extensionId}_menu_${xmlEscape(menuName)}`;
     }
 
@@ -1043,95 +1040,58 @@ class Runtime extends EventEmitter {
     /**
      * Register the primitives provided by an extension.
      * @param {ExtensionMetadata} extensionInfo - information about the extension (id, blocks, etc.)
+     * @param {object} id - the id of oringal extensions or device.
      * @private
      */
-    _registerExtensionPrimitives (extensionInfo) {
-        const categoryInfo = {
-            id: extensionInfo.id,
-            name: maybeFormatMessage(extensionInfo.name),
-            showStatusButton: extensionInfo.showStatusButton,
-            blockIconURI: extensionInfo.blockIconURI,
-            menuIconURI: extensionInfo.menuIconURI
-        };
+    _registerExtensionPrimitives (extensionInfo, id) {
+        const {extensionId, deviceId} = id;
 
-        if (extensionInfo.color1) {
-            categoryInfo.color1 = extensionInfo.color1;
-            categoryInfo.color2 = extensionInfo.color2;
-            categoryInfo.color3 = extensionInfo.color3;
-        } else {
-            categoryInfo.color1 = defaultExtensionColors[0];
-            categoryInfo.color2 = defaultExtensionColors[1];
-            categoryInfo.color3 = defaultExtensionColors[2];
+        if (deviceId) {
+            this._deviceBlockInfo = [];
         }
-
-        this._blockInfo.push(categoryInfo);
-
-        this._fillExtensionCategory(categoryInfo, extensionInfo);
-
-        for (const fieldTypeName in categoryInfo.customFieldTypes) {
-            if (extensionInfo.customFieldTypes.hasOwnProperty(fieldTypeName)) {
-                const fieldTypeInfo = categoryInfo.customFieldTypes[fieldTypeName];
-
-                // Emit events for custom field types from extension
-                this.emit(Runtime.EXTENSION_FIELD_ADDED, {
-                    name: `field_${fieldTypeInfo.extendedName}`,
-                    implementation: fieldTypeInfo.fieldImplementation
-                });
-            }
-        }
-
-        this.emit(Runtime.EXTENSION_ADDED, categoryInfo);
-    }
-
-    /**
-     * Register the primitives provided by an device.
-     * @param {Array.<object>} deviceInfos - information array about the device (id, blocks, etc.)
-     * @private
-     */
-    _registerDevicePrimitives (deviceInfos) {
-        this._deviceBlockInfo = [];
-        const categoryInfoArray = [];
-        deviceInfos.forEach(info => {
+        const categoryInfoArray = extensionInfo.map(category => {
             const categoryInfo = {
-                id: info.id,
-                name: maybeFormatMessage(info.name),
-                blockIconURI: info.blockIconURI,
-                menuIconURI: info.menuIconURI
+                id: category.id,
+                name: maybeFormatMessage(category.name),
+                showStatusButton: category.showStatusButton,
+                blockIconURI: category.blockIconURI,
+                menuIconURI: category.menuIconURI
             };
 
-            if (info.color1) {
-                categoryInfo.color1 = info.color1;
-                categoryInfo.color2 = info.color2;
-                categoryInfo.color3 = info.color3;
+            if (category.color1) {
+                categoryInfo.color1 = category.color1;
+                categoryInfo.color2 = category.color2;
+                categoryInfo.color3 = category.color3;
             } else {
                 categoryInfo.color1 = defaultExtensionColors[0];
                 categoryInfo.color2 = defaultExtensionColors[1];
                 categoryInfo.color3 = defaultExtensionColors[2];
             }
 
-            this._deviceBlockInfo.push(categoryInfo);
+            if (deviceId) {
+                this._deviceBlockInfo.push(categoryInfo);
+            } else {
+                this._blockInfo.push(categoryInfo);
+            }
 
-            this._fillExtensionCategory(categoryInfo, info);
+            this._fillExtensionCategory(categoryInfo, category);
 
             for (const fieldTypeName in categoryInfo.customFieldTypes) {
-                if (info.customFieldTypes.hasOwnProperty(fieldTypeName)) {
+                if (category.customFieldTypes.hasOwnProperty(fieldTypeName)) {
                     const fieldTypeInfo = categoryInfo.customFieldTypes[fieldTypeName];
 
-                    // Emit events for custom field types from device
-                    this.emit(Runtime.DEVICE_FIELD_ADDED, {
+                    // Emit events for custom field types from extension
+                    this.emit(Runtime.SCRATCH_EXTENSION_FIELD_ADDED, {
                         name: `field_${fieldTypeInfo.extendedName}`,
                         implementation: fieldTypeInfo.fieldImplementation
                     });
                 }
             }
-
-            categoryInfoArray.push(categoryInfo);
+            return categoryInfo;
         });
-
-        this.emit(Runtime.DEVICE_ADDED, {
-            device: this._device,
-            categoryInfoArray: categoryInfoArray
-        });
+        // send original device id but not real deivce id.
+        const originalDeivceId = deviceId ? this._deviceId : null;
+        this.emit(Runtime.SCRATCH_EXTENSION_ADDED, {extensionId, deviceId: originalDeivceId, categoryInfoArray});
     }
 
     /**
@@ -1140,14 +1100,18 @@ class Runtime extends EventEmitter {
      * @private
      */
     _refreshExtensionPrimitives (extensionInfo) {
-        const categoryInfo = this._blockInfo.find(info => info.id === extensionInfo.id) ||
-            this._deviceBlockInfo.find(info => info.id === extensionInfo.id);
-        if (categoryInfo) {
-            categoryInfo.name = maybeFormatMessage(extensionInfo.name);
-            this._fillExtensionCategory(categoryInfo, extensionInfo);
+        const categoryInfoArray = [];
+        extensionInfo.forEach(category => {
+            const categoryInfo = this._blockInfo.find(info => info.id === category.id) ||
+            this._deviceBlockInfo.find(info => info.id === category.id);
+            if (categoryInfo) {
+                categoryInfo.name = maybeFormatMessage(category.name);
+                this._fillExtensionCategory(categoryInfo, category);
 
-            this.emit(Runtime.BLOCKSINFO_UPDATE, categoryInfo);
-        }
+                categoryInfoArray.push(categoryInfo);
+            }
+        });
+        this.emit(Runtime.BLOCKSINFO_UPDATE, {categoryInfoArray});
     }
 
     /**
@@ -1345,15 +1309,7 @@ class Runtime extends EventEmitter {
      * @private
      */
     _convertBlockForScratchBlocks (blockInfo, categoryInfo) {
-        const deviceType = this.getCurrentDeviceType();
-        let extendedOpcode;
-        if (deviceType) {
-            extendedOpcode = `${deviceType}_${categoryInfo.id}_${blockInfo.opcode}`;
-        } else {
-            extendedOpcode = `${categoryInfo.id}_${blockInfo.opcode}`;
-        }
-
-
+        const extendedOpcode = `${categoryInfo.id}_${blockInfo.opcode}`;
         const blockJSON = {
             type: extendedOpcode,
             inputsInline: true,
@@ -1687,7 +1643,7 @@ class Runtime extends EventEmitter {
                 let blockFilterIncludesProgramMode = true;
                 if (block.info.programMode) {
                     blockFilterIncludesProgramMode = block.info.programMode.includes(
-                        this.getCurrentIsRealtimeMode() ? ProgramModeType.REALTIME : ProgramModeType.UPLOAD
+                        this.isRealtimeMode() ? ProgramModeType.REALTIME : ProgramModeType.UPLOAD
                     );
                 }
                 // If the block info's `hideFromPalette` is true, then filter out this block
@@ -1744,9 +1700,9 @@ class Runtime extends EventEmitter {
             _loadedDeviceExtensionsXML.push({id: id, xml: value.xml});
         });
 
-        if (this.getCurrentDevice() === null) {
+        if (this.getDeviceId() === null) {
             return this.generateXMLfromBlockInfo(target, this._blockInfo);
-        } else if (this.getCurrentIsRealtimeMode()) {
+        } else if (this.isRealtimeMode()) {
             return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo.concat(this._blockInfo));
         }
         return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo).concat(_loadedDeviceExtensionsXML);
@@ -1837,7 +1793,7 @@ class Runtime extends EventEmitter {
     connectPeripheral (deviceId, peripheralId, baudrate) {
         deviceId = this.analysisRealDeviceId(deviceId);
 
-        if (this.peripheralExtensions[deviceId]) {
+        if (this.peripheralExtensions[deviceId]) {           
             this.peripheralExtensions[deviceId].connect(peripheralId, baudrate);
         }
     }
@@ -1905,6 +1861,18 @@ class Runtime extends EventEmitter {
 
         if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].upload(code);
+        }
+    }
+
+    /**
+     * Abort upload process.
+     * @param {string} deviceId - the id of the extension.
+     */
+    abortUploadToPeripheral (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+
+        if (this.peripheralExtensions[deviceId]) {
+            this.peripheralExtensions[deviceId].abortUpload();
         }
     }
 
@@ -2547,19 +2515,19 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Set the current selected device known by the runtime.
-     * @param {!Device} device of current.
+     * Set the current selected device's id known by the runtime.
+     * @param {!Device} deviceId of current.
      */
-    setDevice (device) {
-        this._device = device;
+    setDeviceId (deviceId) {
+        this._deviceId = deviceId;
     }
 
     /**
      * Get the current selected device.
      * @return {?Device} current selected device known by the runtime.
      */
-    getCurrentDevice () {
-        return this._device;
+    getDeviceId () {
+        return this._deviceId;
     }
 
     /**
@@ -2574,7 +2542,7 @@ class Runtime extends EventEmitter {
      * Get the current selected device type.
      * @return {?DeviceType} current selected device type known by the runtime.
      */
-    getCurrentDeviceType () {
+    getDeviceType () {
         return this._deviceType;
     }
 
@@ -2623,7 +2591,7 @@ class Runtime extends EventEmitter {
     /**
      * Clear all device extensions of the _loadedDeviceExtensions.
      */
-    clearCurrentDeviceExtension () {
+    clearDeviceExtension () {
         this._loadedDeviceExtensions.clear();
     }
 
@@ -2640,7 +2608,7 @@ class Runtime extends EventEmitter {
      * Get the current Loaded device extension.
      * @return {Array.id} array of current loaded device extension ids.
      */
-    getCurrentDeviceExtensionLoaded () {
+    getLoadedDeviceExtension () {
         const ids = [];
         this._loadedDeviceExtensions.forEach((value, id) => {
             ids.push(id);
@@ -2663,27 +2631,27 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Add a extension to the _loadedExtensions.
+     * Add a extension to the _loadedScratchExtensions.
      * @param {string} id id of this extension.
      */
-    addExtension (id) {
-        this._loadedExtensions.push(id);
+    addScratchExtension (id) {
+        this._loadedScratchExtensions.push(id);
     }
 
     /**
-     * Clear all extensions of the _loadedExtensions.
+     * Clear all extensions of the _loadedScratchExtensions.
      */
-    clearCurrentExtension () {
+    clearScratchExtension () {
         this._blockInfo = [];
-        this._loadedExtensions = [];
+        this._loadedScratchExtensions = [];
     }
 
     /**
      * Get the current Loaded extension.
      * @return {Array.id} array of current loaded extension ids.
      */
-    getCurrentExtensionLoaded () {
-        return this._loadedExtensions;
+    getLoadedExtension () {
+        return this._loadedScratchExtensions;
     }
 
     /**
@@ -2693,8 +2661,8 @@ class Runtime extends EventEmitter {
     setRealtimeMode (sta) {
         if (this._isRealtimeMode !== sta){
             this._isRealtimeMode = sta;
-            if (sta && this.getPeripheralIsConnected(this._device)) {
-                this.setPeripheralBaudrate(this._device, this._realtimeBaudrate);
+            if (sta && this.getPeripheralIsConnected(this._deviceId)) {
+                this.setPeripheralBaudrate(this._deviceId, this._realtimeBaudrate);
             }
             this.emit(Runtime.PROGRAM_MODE_UPDATE, {isRealtimeMode: this._isRealtimeMode});
         }
@@ -2704,7 +2672,7 @@ class Runtime extends EventEmitter {
      * Get whether the current program mode is realtime mode.
      * @return {boolean} whether the current program mode is realtime mode.
      */
-    getCurrentIsRealtimeMode () {
+    isRealtimeMode () {
         return this._isRealtimeMode;
     }
 
@@ -3070,12 +3038,7 @@ class Runtime extends EventEmitter {
      * @property {string} [label] - the label for this opcode if `labelFn` is absent
      */
     getLabelForOpcode (extendedOpcode) {
-        let categoryAndOpcode;
-        if (this.getCurrentDeviceType()) {
-            categoryAndOpcode = StringUtil.splitFirst(extendedOpcode, '_')[1];
-        } else {
-            categoryAndOpcode = extendedOpcode;
-        }
+        const categoryAndOpcode = extendedOpcode;
         const [category, opcode] = StringUtil.splitFirst(categoryAndOpcode, '_');
 
         if (!(category && opcode)) return;

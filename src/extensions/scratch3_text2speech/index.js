@@ -139,6 +139,13 @@ class Scratch3Text2SpeechBlocks {
     }
 
     /**
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'text2speech';
+    }
+
+    /**
      * An object with info for each voice.
      */
     get VOICE_INFO () {
@@ -411,7 +418,7 @@ class Scratch3Text2SpeechBlocks {
             });
         }
 
-        return {
+        return [{
             id: 'text2speech',
             name: formatMessage({
                 id: 'text2speech.categoryName',
@@ -479,7 +486,7 @@ class Scratch3Text2SpeechBlocks {
                     items: this.getLanguageMenu()
                 }
             }
-        };
+        }];
     }
 
     /**

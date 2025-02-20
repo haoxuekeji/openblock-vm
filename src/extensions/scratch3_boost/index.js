@@ -1255,6 +1255,12 @@ class Scratch3BoostBlocks {
     /**
      * @return {string} - the ID of this extension.
      */
+    get EXTENSION_ID () {
+        return 'boost';
+    }
+    /**
+     * @return {string} - the ID of this extension.
+     */
     static get EXTENSION_ID () {
         return 'boost';
     }
@@ -1285,7 +1291,7 @@ class Scratch3BoostBlocks {
      * @returns {object} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: Scratch3BoostBlocks.EXTENSION_ID,
             name: 'BOOST',
             blockIconURI: iconURI,
@@ -1724,7 +1730,7 @@ class Scratch3BoostBlocks {
                     ]
                 }
             }
-        };
+        }];
     }
 
     /**

@@ -177,6 +177,13 @@ class ArduinoPeripheral{
     }
 
     /**
+     * Called by the runtime when user wants to abort the uploading process.
+     */
+    abortUpload () {
+        this._serialport.abortUpload();
+    }
+
+    /**
      * Called by the runtime when user wants to scan for a peripheral.
      * @param {Array.<string>} pnpidList - the array of pnp id list
      * @param {bool} listAll - wether list all connectable device
@@ -283,7 +290,7 @@ class ArduinoPeripheral{
      * @private
      */
     _startHeartbeat () {
-        if (this._runtime.getCurrentIsRealtimeMode()) {
+        if (this._runtime.isRealtimeMode()) {
             // eslint-disable-next-line no-negated-condition
             if (!this._firmata) {
                 // Start a timeout to report that firmata did not receive the ready event.
@@ -371,7 +378,7 @@ class ArduinoPeripheral{
      * Handle the program mode update event. If in realtime mode start the heartbeat else stop.
      */
     _handleProgramModeUpdate () {
-        if (this._runtime.getCurrentIsRealtimeMode()) {
+        if (this._runtime.isRealtimeMode()) {
             this._startHeartbeat();
         } else {
             // If _firmataReadyTimeoutID is still not null when switching to upload mode, it means
@@ -411,7 +418,7 @@ class ArduinoPeripheral{
      * @private
      */
     _onMessage (base64) {
-        if (this._runtime.getCurrentIsRealtimeMode()) {
+        if (this._runtime.isRealtimeMode()) {
             const data = Base64Util.base64ToUint8Array(base64);
             this._firmata.onReciveData(data);
         } else {
@@ -425,7 +432,7 @@ class ArduinoPeripheral{
      * @return {boolean} - whether the peripheral is ready for realtime mode communication.
      */
     isReady () {
-        if (this._runtime.getCurrentIsRealtimeMode() && this._isFirmataConnected) {
+        if (this._runtime.isRealtimeMode() && this._isFirmataConnected) {
             return true;
         }
         return false;
