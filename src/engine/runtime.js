@@ -108,9 +108,27 @@ const ArgumentTypeMap = (() => {
             fieldName: 'NOTE'
         }
     };
-    map[ArgumentType.OTO100_NUMBER] = {
+    map[ArgumentType.INTEGER_NUMBER] = {
         shadow: {
-            type: 'math_0to100_number',
+            type: 'math_integer',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.WHOLE_NUMBER] = {
+        shadow: {
+            type: 'math_whole_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.POSITIVE_NUMBER] = {
+        shadow: {
+            type: 'math_positive_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INT8_NUMBER] = {
+        shadow: {
+            type: 'math_int8_number',
             fieldName: 'NUM'
         }
     };
@@ -120,9 +138,51 @@ const ArgumentTypeMap = (() => {
             fieldName: 'NUM'
         }
     };
+    map[ArgumentType.INT9_NUMBER] = {
+        shadow: {
+            type: 'math_int9_number',
+            fieldName: 'NUM'
+        }
+    };
     map[ArgumentType.UINT10_NUMBER] = {
         shadow: {
             type: 'math_uint10_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INT11_NUMBER] = {
+        shadow: {
+            type: 'math_int11_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.UINT16_NUMBER] = {
+        shadow: {
+            type: 'math_uint16_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INTOTO100_NUMBER] = {
+        shadow: {
+            type: 'math_int0to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.OTO100_NUMBER] = {
+        shadow: {
+            type: 'math_0to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INTN100TO100_NUMBER] = {
+        shadow: {
+            type: 'math_intn100to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.N100TO100_NUMBER] = {
+        shadow: {
+            type: 'math_n100to100_number',
             fieldName: 'NUM'
         }
     };
@@ -252,22 +312,10 @@ class Runtime extends EventEmitter {
         this._isRealtimeMode = true;
 
         /**
-         * Currently selected device's id.
-         * @type {?Device}
+         * Currently selected device.
+         * @type {?object}
          */
-        this._deviceId = null;
-
-        /**
-         * Currently selected device type.
-         * @type {?DeviceType}
-         */
-        this._deviceType = null;
-
-        /**
-         * Currently device pnp id list.
-         * @type {?Array.<string>}
-         */
-        this._pnpIdList = [];
+        this._device = {deviceId: null, type: null, pnpIdList: []};
 
         /**
          * Currently device realtime firmware serialport baudrate.
@@ -1090,8 +1138,8 @@ class Runtime extends EventEmitter {
             return categoryInfo;
         });
         // send original device id but not real deivce id.
-        const originalDeivceId = deviceId ? this._deviceId : null;
-        this.emit(Runtime.SCRATCH_EXTENSION_ADDED, {extensionId, deviceId: originalDeivceId, categoryInfoArray});
+        const originalDeviceId = deviceId ? this._device.deviceId : null;
+        this.emit(Runtime.SCRATCH_EXTENSION_ADDED, {extensionId, deviceId: originalDeviceId, categoryInfoArray});
     }
 
     /**
@@ -1231,7 +1279,7 @@ class Runtime extends EventEmitter {
         };
     }
 
-    _buildCustomFieldInfo (fieldName, fieldInfo, extensionId, categoryInfo) {
+    _buildCustomFieldInfo (fieldName, fieldInfo, extensionId) {
         const extendedName = `${extensionId}_${fieldName}`;
         return {
             fieldName: fieldName,
@@ -1239,14 +1287,12 @@ class Runtime extends EventEmitter {
             argumentTypeInfo: {
                 shadow: {
                     type: extendedName,
-                    fieldName: `field_${extendedName}`
+                    fieldName: fieldInfo.args0[0].name
                 }
             },
             scratchBlocksDefinition: this._buildCustomFieldTypeForScratchBlocks(
                 extendedName,
-                fieldInfo.output,
-                fieldInfo.outputShape,
-                categoryInfo
+                fieldInfo
             ),
             fieldImplementation: fieldInfo.implementation
         };
@@ -1256,28 +1302,21 @@ class Runtime extends EventEmitter {
      * Build the scratch-blocks JSON needed for a fieldType.
      * Custom field types need to be namespaced to the extension so that extensions can't interfere with each other
      * @param  {string} fieldName - The name of the field
-     * @param {string} output - The output of the field
-     * @param {number} outputShape - Shape of the field (from ScratchBlocksConstants)
-     * @param {object} categoryInfo - The category the field belongs to (Used to set its colors)
+     * @param {string} fieldInfo - The info of the field
      * @returns {object} - Object to be inserted into scratch-blocks
      */
-    _buildCustomFieldTypeForScratchBlocks (fieldName, output, outputShape, categoryInfo) {
+    _buildCustomFieldTypeForScratchBlocks (fieldName, fieldInfo) {
         return {
             json: {
                 type: fieldName,
                 message0: '%1',
                 inputsInline: true,
-                output: output,
-                colour: categoryInfo.color1,
-                colourSecondary: categoryInfo.color2,
-                colourTertiary: categoryInfo.color3,
-                outputShape: outputShape,
-                args0: [
-                    {
-                        name: `field_${fieldName}`,
-                        type: `field_${fieldName}`
-                    }
-                ]
+                output: fieldInfo.output,
+                colour: fieldInfo.color1,
+                colourSecondary: fieldInfo.color2,
+                colourTertiary: fieldInfo.color3,
+                outputShape: fieldInfo.outputShape,
+                args0: fieldInfo.args0
             }
         };
     }
@@ -1694,19 +1733,17 @@ class Runtime extends EventEmitter {
      * @param {?Target} [target] - the active editing target (optional)
      */
     getBlocksXML (target) {
-        const _loadedDeviceExtensionsXML = [];
+        const _loadedDeviceExtensionsInfo = [];
         this._loadedDeviceExtensions.forEach((value, id) => {
-
-            _loadedDeviceExtensionsXML.push({id: id, xml: value.xml});
+            _loadedDeviceExtensionsInfo.push({id: id, xml: value.xml});
         });
 
-        if (this.getDeviceId() === null) {
+        if (this._device.deviceId === null) {
             return this.generateXMLfromBlockInfo(target, this._blockInfo);
         } else if (this.isRealtimeMode()) {
             return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo.concat(this._blockInfo));
         }
-        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo).concat(_loadedDeviceExtensionsXML);
-
+        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo).concat(_loadedDeviceExtensionsInfo);
     }
 
     /**
@@ -1780,7 +1817,7 @@ class Runtime extends EventEmitter {
         deviceId = this.analysisRealDeviceId(deviceId);
 
         if (this.peripheralExtensions[deviceId]) {
-            this.peripheralExtensions[deviceId].scan(this.getPnpIdList(), listAll);
+            this.peripheralExtensions[deviceId].scan(this._device.pnpIdList, listAll);
         }
     }
 
@@ -2515,51 +2552,26 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Set the current selected device's id known by the runtime.
-     * @param {!Device} deviceId of current.
+     * Set the current selected device known by the runtime.
+     * @param {!object} device the object of device.
      */
-    setDeviceId (deviceId) {
-        this._deviceId = deviceId;
+    setDevice (device) {
+        this._device = device;
+    }
+
+    /**
+     * Clear the selected device.
+     */
+    clearDevice () {
+        this._device = {deviceId: null, type: null, pnpIdList: []};
     }
 
     /**
      * Get the current selected device.
      * @return {?Device} current selected device known by the runtime.
      */
-    getDeviceId () {
-        return this._deviceId;
-    }
-
-    /**
-     * Set the current selected device type known by the runtime.
-     * @param {!DeviceType} type of deivce of current.
-     */
-    setDeviceType (type) {
-        this._deviceType = type;
-    }
-
-    /**
-     * Get the current selected device type.
-     * @return {?DeviceType} current selected device type known by the runtime.
-     */
-    getDeviceType () {
-        return this._deviceType;
-    }
-
-    /**
-     * Set the device pnp id list known by the runtime.
-     * @param {Array.<string>} pnpidList pnp id list.
-     */
-    setPnpIdList (pnpidList) {
-        this._pnpIdList = pnpidList;
-    }
-
-    /**
-     * Get the current device pnp id list.
-     * @return {?Array.<string>} current device pnp id list known by the runtime.
-     */
-    getPnpIdList () {
-        return this._pnpIdList;
+    getDevice () {
+        return this._device;
     }
 
     /**
@@ -2609,11 +2621,7 @@ class Runtime extends EventEmitter {
      * @return {Array.id} array of current loaded device extension ids.
      */
     getLoadedDeviceExtension () {
-        const ids = [];
-        this._loadedDeviceExtensions.forEach((value, id) => {
-            ids.push(id);
-        });
-        return ids;
+        return Array.from(this._loadedDeviceExtensions.keys());
     }
 
     /**
@@ -2631,7 +2639,7 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Add a extension to the _loadedScratchExtensions.
+     * Add a scratch extension id to the _loadedScratchExtensions.
      * @param {string} id id of this extension.
      */
     addScratchExtension (id) {
@@ -2639,18 +2647,29 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Clear all extensions of the _loadedScratchExtensions.
+     * Remove a scratch extension id from the _loadedScratchExtensions.
+     * @param {string} id id of this device extension.
+     */
+    removeScratchExtension (id) {
+        this._blockInfo.splice(this._blockInfo.indexOf(id), 1);
+        this._loadedScratchExtensions.splice(this._loadedScratchExtensions.indexOf(id), 1);
+        this.emit(Runtime.SCRATCH_EXTENSION_REMOVED);
+    }
+
+    /**
+     * Clear all scratch extensions.
      */
     clearScratchExtension () {
         this._blockInfo = [];
         this._loadedScratchExtensions = [];
+        this.emit(Runtime.SCRATCH_EXTENSION_REMOVED);
     }
 
     /**
-     * Get the current Loaded extension.
+     * Get the current Loaded scratch extension.
      * @return {Array.id} array of current loaded extension ids.
      */
-    getLoadedExtension () {
+    getLoadedScratchExtension () {
         return this._loadedScratchExtensions;
     }
 
@@ -2661,8 +2680,8 @@ class Runtime extends EventEmitter {
     setRealtimeMode (sta) {
         if (this._isRealtimeMode !== sta){
             this._isRealtimeMode = sta;
-            if (sta && this.getPeripheralIsConnected(this._deviceId)) {
-                this.setPeripheralBaudrate(this._deviceId, this._realtimeBaudrate);
+            if (sta && this.getPeripheralIsConnected(this._device.deviceId)) {
+                this.setPeripheralBaudrate(this._device.deviceId, this._realtimeBaudrate);
             }
             this.emit(Runtime.PROGRAM_MODE_UPDATE, {isRealtimeMode: this._isRealtimeMode});
         }

@@ -64,7 +64,7 @@ jobs:
 
       - run: npm ci
 
-    # Don't push translations to TX, the push step will be run by the enterprise edition repository.
+    # Don't push translations to TX, the push step will be run by the distro repository.
     #   - name: Push i18n
     #     run: |
     #         export TX_TOKEN=${{ secrets.TX_TOKEN }}

@@ -865,7 +865,7 @@ class OpenBlockArduinoEsp32Device {
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
+                                menu: 'pins',
                                 defaultValue: Pins.IO2
                             },
                             MODE: {

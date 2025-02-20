@@ -37,7 +37,7 @@ const SERIAL_CONFIG = {
 const DIVECE_OPT = {
     type: 'arduino',
     fqbn: 'arduino:avr:uno',
-    firmware: 'arduinoUno.standardFirmata.ino.hex'
+    firmware: 'arduinoUno.hex'
 };
 
 const Pins = {
@@ -469,6 +469,8 @@ class OpenBlockArduinoUnoDevice {
 
         // Create a new Arduino uno peripheral instance
         this._peripheral = new ArduinoUno(this.runtime, this.DEVICE_ID, originalDeviceId);
+
+        this._peripheral.numDigitalPins = 14;
     }
 
     /**

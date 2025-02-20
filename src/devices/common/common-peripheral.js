@@ -69,9 +69,10 @@ class CommonPeripheral{
      * Called by the runtime when user wants to upload realtime firmware to a peripheral.
      */
     uploadFirmware () {
+        this._serialport.uploadFirmware(this.diveceOpt);
     }
 
-    
+
     /**
      * Called by the runtime when user wants to abort the uploading process.
      */

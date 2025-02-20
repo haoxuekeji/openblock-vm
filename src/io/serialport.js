@@ -148,11 +148,11 @@ class Serialport extends JSONRPC {
      * @return {Promise} - a promise from the remote send request.
      */
     upload (message, config, encoding = null) {
+        config.library = this._runtime.getCurrentDeviceExtensionLibrary();
         const params = {message, config};
         if (encoding) {
             params.encoding = encoding;
         }
-        params.library = this._runtime.getCurrentDeviceExtensionLibrary();
         return this.sendRemoteRequest('upload', params)
             .catch(e => {
                 this.handleDisconnectError(e);

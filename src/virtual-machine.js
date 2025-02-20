@@ -590,8 +590,21 @@ class VirtualMachine extends EventEmitter {
                     performance.measure('scratch-vm-deserialize',
                         'scratch-vm-deserialize-start', 'scratch-vm-deserialize-end');
                 }
-                return this.installDevice(targets, projectJSON.device, projectJSON.deviceType,
-                    projectJSON.pnpIdList, projectJSON.programMode, projectJSON.deviceExtensions);
+
+                let device = {};
+
+                // Since the new version of the project file incorporates the parameters of the device,
+                // if the device is found to be a string, it means that the project file is an old version
+                // of the project and needs to be read using the old method.
+                if (typeof projectJSON.device === 'string') {
+                    device.deviceId = projectJSON.device;
+                    device.type = projectJSON.deviceType;
+                    device.pnpIdList = projectJSON.pnpIdList;
+                } else if (typeof projectJSON.device === 'object' && projectJSON.device !== null) {
+                    device = projectJSON.device;
+                }
+
+                return this.installDevice(targets, device, projectJSON.programMode, projectJSON.deviceExtensions);
             })
             // Step2: Install target and if there has deivce setting, set the editing target to stage incase there is
             // device extensions block in sprite workspace, it will cause error.
@@ -655,19 +668,17 @@ class VirtualMachine extends EventEmitter {
     /**
      * Install `deserialize` results: device.
      * @param {Array.<Target>} targets - the targets to be installed
-     * @param {string} device - the deivce to be installed
-     * @param {string} deviceType - the type of deivce to be installed
-     * @param {Array.<string>} pnpIdList - the pnp id filter list of the device
+     * @param {object} device - the device to be installed
      * @param {string} programMode - the program mode
      * @returns {Promise} Promise that resolves after all device extensions has loaded
      */
-    installDevice (targets, device = null, deviceType = null, pnpIdList = null, programMode = 'realtime') {
+    installDevice (targets, device, programMode = 'realtime') {
         targets = targets.filter(target => !!target);
 
-        if (device) {
+        if (device.deviceId) {
             this.runtime.setRealtimeMode(programMode === 'realtime');
 
-            return this.extensionManager.loadDeviceURL(device, deviceType, pnpIdList)
+            return this.extensionManager.loadDeviceURL(device)
                 .then(() => targets);
         }
         return targets;

@@ -48,6 +48,7 @@
     "scratch-translate-extension-languages": "0.0.20191118205314",
     "sweetalert": "^2.1.2",
     "text-encoding": "0.7.0",
+    "valid-url": "^1.0.9",
     "worker-loader": "^1.1.1"
   },
   "peerDependencies": {

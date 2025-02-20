@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const loadjs = require('loadjs');
 const formatMessage = require('format-message');
+const validUrl = require('valid-url');
 
 const dispatch = require('../dispatch/central-dispatch');
 const log = require('../util/log');
@@ -126,6 +127,12 @@ class ExtensionManager {
         this.pendingWorkers = [];
 
         /**
+         * Map of scratch extensions that can be loaded.
+         * @type {Array.<Extensions>}
+         */
+        this._extensionsList = [];
+
+        /**
          * Set of loaded extension URLs/IDs (equivalent for built-in extensions).
          * @type {Set.<string>}
          * @private
@@ -140,10 +147,10 @@ class ExtensionManager {
         this._loadedDevice = new Map();
 
         /**
-         * Map of extensions.
+         * Map of device extensions that can be loaded.
          * @type {Array.<DeviceExtensions>}
          */
-        this._deviceExtensions = [];
+        this._deviceExtensionsList = [];
 
         /**
          * Keep a reference to the runtime so we can construct internal extension objects.
@@ -177,6 +184,26 @@ class ExtensionManager {
      */
     isDeviceLoaded(deviceID) {
         return this._loadedDevice.has(deviceID);
+    }
+
+    /**
+     * Get extensions list from local server.
+     * @param {string} extensions - raw extensions data
+     * @returns {Promise} resolved extension list has been fetched or failure
+     */
+    getExtensionsList (extensions) {
+        return new Promise(resolve => {
+            const processedExtensions = extensions.map(extension => {
+                if (this.isExtensionLoaded(extension.extensionId)) {
+                    extension.isLoaded = true;
+                } else {
+                    extension.isLoaded = false;
+                }
+                return extension;
+            });
+
+            return resolve(processedExtensions);
+        });
     }
 
     /**
@@ -236,6 +263,23 @@ class ExtensionManager {
     }
 
     /**
+     * Unload an extension by URL or internal extension ID
+     * @param {string} extensionURL - the URL for the extension to load OR the ID of an internal extension
+     */
+    unloadExtension (extensionURL) {
+        this._loadedExtensions.delete(extensionURL);
+        this.runtime.removeScratchExtension(extensionURL);
+    }
+
+    /**
+     * Unload all extension
+     */
+    clearExtensions () {
+        this._loadedExtensions.clear();
+        this.runtime.clearScratchExtension();
+    }
+
+    /**
      * Get unbuild-in devices list from local server.
      * @returns {Promise} resolved devices list has been fetched or failure
      */
@@ -244,7 +288,44 @@ class ExtensionManager {
             fetch(`${localResourcesServerUrl}devices/${formatMessage.setup().locale}.json`)
                 .then(response => response.json())
                 .then(devices => {
-                    devices = devices.map(dev => {
+                    // filter unsupported distribution content
+                    let filteredDevices = [];
+                    let currentBases = 'none';
+
+                    devices.forEach(dev => {
+                        // Filter out devices that are not inherited but have multiple programming
+                        // frameworks, and only keep devices with the Arduino framework
+                        const deviceId = dev.deviceId;
+                        if (!deviceId.startsWith('arduino') && !deviceId.startsWith('microPython')) {
+                            currentBases = deviceId;
+                            filteredDevices.push(dev);
+                        } else if (deviceId.indexOf(currentBases.charAt(0).toUpperCase() +
+                            currentBases.slice(1)) === -1) {
+                            currentBases = deviceId;
+                            filteredDevices.push(dev);
+                        } else if (deviceId.startsWith('arduino')) {
+                            filteredDevices.pop();
+                            filteredDevices.push(dev);
+                        }
+                    });
+
+                    filteredDevices = filteredDevices.filter(dev => {
+                        // Filter out external non-inherited devices
+                        if ((dev.deviceId.indexOf('_') === -1) && (!!dev.name)) {
+                            return false;
+                        }
+
+                        // Filter out devices that are inherited but have multiple programming
+                        // frameworks, and only keep devices with the Arduino framework
+                        if ((dev.deviceId.indexOf('_') !== -1) && !!dev.typeList &&
+                            (dev.deviceId.indexOf('arduino') === -1)) {
+                            return false;
+                        }
+                        return true;
+                    });
+
+                    devices = filteredDevices.map(dev => {
+                        dev.hide = false;
                         dev.iconURL = localResourcesServerUrl + dev.iconURL;
                         dev.connectionIconURL = localResourcesServerUrl + dev.connectionIconURL;
                         dev.connectionSmallIconURL = localResourcesServerUrl + dev.connectionSmallIconURL;
@@ -261,17 +342,16 @@ class ExtensionManager {
 
     /**
      * Load an device by URL or internal device ID
-     * @param {string} deviceId - the URL for the device to load OR the ID of an internal device
-     * @param {string} deviceType - the type of device
-     * @param {Array.<string>} pnpidList - the array of pnpid list
+     * @param {object} device - the device to be load
      * @returns {Promise} resolved once the device is loaded and initialized or rejected on failure
      */
-    loadDeviceURL(deviceId, deviceType, pnpidList) {
+    loadDeviceURL (device) {
         // if no deviceid return
-        if (deviceId === 'null') {
+        if (device.deviceId === 'null') {
             this.clearDevice();
             return Promise.resolve();
         }
+        const {deviceId, type, pnpidList} = device;
 
         const realDeviceId = this.runtime.analysisRealDeviceId(deviceId);
 
@@ -283,23 +363,20 @@ class ExtensionManager {
             }
 
             // Try to disconnect the old device before change device.
-            this.runtime.disconnectPeripheral(this.runtime.getDeviceId());
+            this.runtime.disconnectPeripheral(this.runtime.getDevice().deviceId);
 
-            this.runtime.setDeviceId(deviceId);
-            this.runtime.setDeviceType(deviceType);
-            this.runtime.setPnpIdList(pnpidList);
+            this.runtime.setDevice({deviceId: deviceId, type: type, pnpIdList: pnpidList});
             this.runtime.clearMonitor();
-            const device = builtinDevices[realDeviceId]();
-            const deviceInstance = new device(this.runtime, deviceId);
+            const dev = builtinDevices[realDeviceId]();
+            const deviceInstance = new dev(this.runtime, deviceId);
             const serviceName = this._registerInternalExtension(deviceInstance);
             this._loadedDevice.clear();
 
             this._loadedDevice.set(deviceId, serviceName);
 
             // Clear current extentions.
-            this.runtime.clearScratchExtension();
-            this._loadedExtensions.clear();
-            this.unloadAllDeviceExtension();
+            this.clearExtensions();
+            this.clearDeviceExtension();
 
             return Promise.resolve();
         }
@@ -311,22 +388,21 @@ class ExtensionManager {
      * Clear curent device
      */
     clearDevice () {
-        this.runtime.disconnectPeripheral(this.runtime.getDeviceId());
+        if (this.runtime.getDevice().deviceId) {
+            this.runtime.disconnectPeripheral(this.runtime.getDevice().deviceId);
 
-        const deviceId = this.runtime.getDeviceId();
+            const deviceId = this.runtime.getDevice().deviceId;
 
-        this.runtime.setDeviceId(null);
-        this.runtime.setDeviceType(null);
-        this.runtime.setPnpIdList([]);
-        this.runtime.clearMonitor();
-        this._loadedDevice.clear();
+            this.runtime.clearDevice();
+            this.runtime.clearMonitor();
+            this._loadedDevice.clear();
 
-        // Clear current extentions.
-        this.runtime.clearScratchExtension();
-        this._loadedExtensions.clear();
-        this.unloadAllDeviceExtension();
+            // Clear current extentions.
+            this.clearExtensions();
+            this.clearDeviceExtension();
 
-        this.runtime.emit(this.runtime.constructor.SCRATCH_EXTENSION_REMOVED, {deviceId});
+            this.runtime.emit(this.runtime.constructor.SCRATCH_EXTENSION_REMOVED, {deviceId});
+        }
     }
 
     /**
@@ -338,15 +414,26 @@ class ExtensionManager {
             fetch(`${localResourcesServerUrl}extensions/${formatMessage.setup().locale}.json`)
                 .then(response => response.json())
                 .then(extensions => {
-                    extensions = extensions.map(extension => {
+                    // filter unsupported distribution content
+                    let filteredExtensions = [];
+                    filteredExtensions = extensions.filter(extension => {
+                        // if the extension only has main.js but no blocks.js,
+                        // the plugin should be blocked
+                        if (!!extension.main && !extension.blocks) {
+                            return false;
+                        }
+                        return true;
+                    });
+
+                    extensions = filteredExtensions.map(extension => {
                         extension.iconURL = localResourcesServerUrl + extension.iconURL;
                         if (this.isDeviceExtensionLoaded(extension.extensionId)) {
                             extension.isLoaded = true;
                         }
                         return extension;
                     });
-                    this._deviceExtensions = extensions;
-                    return resolve(this._deviceExtensions);
+                    this._deviceExtensionsList = extensions;
+                    return resolve(this._deviceExtensionsList);
                 }, err => {
                     log.warn(`Can not fetch data from local extension server: ${err}`);
                     return resolve();
@@ -370,37 +457,45 @@ class ExtensionManager {
      */
     loadDeviceExtension(deviceExtensionId) {
         return new Promise((resolve, reject) => {
-            const deviceExtension = this._deviceExtensions.find(ext => ext.extensionId === deviceExtensionId);
+            const deviceExtension = this._deviceExtensionsList.find(ext => ext.extensionId === deviceExtensionId);
             if (typeof deviceExtension === 'undefined') {
                 return reject(`Error while loadDeviceExtension device extension ` +
                     `can not find device extension: ${deviceExtensionId}`);
             }
 
-            const url = localResourcesServerUrl;
-            const toolboxUrl = url + deviceExtension.toolbox;
-            const blockUrl = url + deviceExtension.blocks;
-            const generatorUrl = url + deviceExtension.generator;
-            const msgUrl = url + deviceExtension.msg;
+            let registerUrls = [];
+
+            registerUrls.push(deviceExtension.toolbox);
+            registerUrls.push(deviceExtension.blocks);
+            registerUrls.push(deviceExtension.translations);
+            registerUrls.push(deviceExtension.generator);
+
+            // Remove null values
+            registerUrls = registerUrls.filter(url => url !== null && typeof url !== 'undefined' && url !== '');
+
+            // If it is a local file, add the localhost address in front
+            registerUrls = registerUrls.map(url => {
+                if (!validUrl.isWebUri(url)) {
+                    return localResourcesServerUrl + url;
+                }
+                return url;
+            });
 
             // clear global register before load external extension.
-            global.addToolbox = null;
             global.registerToolboxs = null;
-            global.addBlocks = null;
             global.registerBlocks = null;
-            global.addGenerator = null;
             global.registerGenerators = null;
-            global.addMsg = null;
-            global.registerMessages = null;
+            global.registerBlocksMessages = null;
 
-            loadjs([toolboxUrl, blockUrl, generatorUrl, msgUrl], {returnPromise: true})
+            loadjs(registerUrls, {returnPromise: true})
                 .then(() => {
-                    const getToolboxXML = global.registerToolboxs || global.addToolbox;
+                    const getToolboxXML = global.registerToolboxs;
                     this.runtime.addDeviceExtension(deviceExtensionId, getToolboxXML(), deviceExtension.library);
 
                     const deviceExtensionsRegister = {
-                        defineBlocks: global.registerBlocks || global.addBlocks,
-                        defineGenerators: global.registerGenerators || global.addGenerator,
-                        defineMessages: global.registerMessages || global.addMsg
+                        defineBlocks: global.registerBlocks,
+                        defineGenerators: global.registerGenerators,
+                        defineMessages: global.registerBlocksMessages
                     };
 
                     this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_ADDED, deviceExtensionsRegister);
@@ -414,29 +509,20 @@ class ExtensionManager {
     /**
      * Unload an device extension by device extension ID
      * @param {string} deviceExtensionId - the ID of an device extension
-     * @returns {Promise} resolved once the device extension is unloaded or rejected on failure
      */
-    unloadDeviceExtension(deviceExtensionId) {
-        return new Promise(resolve => {
-            this.runtime.removeDeviceExtension(deviceExtensionId);
-            this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_REMOVED);
-            return resolve();
-        });
+    unloadDeviceExtension (deviceExtensionId) {
+        this.runtime.removeDeviceExtension(deviceExtensionId);
+        this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_REMOVED);
     }
 
     /**
      * Unload all device extensions
-     * @returns {Promise} resolved once all device extensions is unloaded
      */
-    unloadAllDeviceExtension() {
-        const allPromises = [];
-
+    clearDeviceExtension () {
         const loadedDeviceExtensionId = this.runtime.getLoadedDeviceExtension();
         loadedDeviceExtensionId.forEach(id => {
-            allPromises.push(this.unloadDeviceExtension(id));
+            this.unloadDeviceExtension(id);
         });
-
-        return Promise.all(allPromises);
     }
 
     /**
@@ -464,9 +550,9 @@ class ExtensionManager {
      * @returns {Promise} resolved once all the extensions have been reinitialized
      */
     refreshBlocks () {
-        const loadedExtensionsAndDevice = Array.from(this._loadedExtensions.values())
+        const allServiceName = Array.from(this._loadedExtensions.values())
             .concat(Array.from(this._loadedDevice.values()));
-        const allPromises = loadedExtensionsAndDevice.map(serviceName =>
+        const allPromises = allServiceName.map(serviceName =>
             dispatch.call(serviceName, 'getInfo')
                 .then(info => {
                     info = this._prepareExtensionInfo(serviceName, info, this.getIdFromServiceName(serviceName));
@@ -579,7 +665,7 @@ class ExtensionManager {
                 throw new Error('Invalid category id');
             }
             if (id.deviceId) {
-                category.id = `${this.runtime.getDeviceType()}_${category.id}`;
+                category.id = `${this.runtime.getDevice().type}_${category.id}`;
             }
             category.name = category.name || category.id;
             category.blocks = category.blocks || [];
