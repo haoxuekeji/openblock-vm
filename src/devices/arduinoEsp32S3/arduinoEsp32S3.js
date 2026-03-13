@@ -13,6 +13,8 @@ const CommonPeripheral = require('../common/common-peripheral');
 const PNPID_LIST = [
     // CH340
     'USB\\VID_1A86&PID_7523',
+    // CH343
+    'USB\\VID_1A86&PID_55D3',
     // CH9102
     'USB\\VID_1A86&PID_55D4',
     // CP2102
@@ -36,9 +38,13 @@ const SERIAL_CONFIG = {
 const DIVECE_OPT = {
     type: 'arduino',
     // Upload Speed: "921600" for windows, "460800" for mac and linux
-    // CPU Frequency: "240MHz (WiFi/BT)"
-    // Flash Frequency: "80MHz"
-    // Flash Mode: "QIO"
+    // USB Mode: "Hardware CDC and JTAG"
+    // USB CDC On Boot: "Disabled'
+    // USB Firmware MSC On Boot: "Disabled
+    // USB DFU On Boot: "Disabled
+    // Upload Mode: "UART0 / Hardware CDC
+    // CPU Frequency: "240MHz (WiFì)"
+    // Flash Mode: "QIO 80MHz'
     // Flash Size: "4MB (32Mb)"
     // Partition Scheme: "Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)"
     // Core Debug Level: "None"
@@ -49,9 +55,9 @@ const DIVECE_OPT = {
     // JTAG Adapter: "Disabled"
     // Zigbee Mode: "Disabled"
     fqbn: {
-        darwin: 'esp32:esp32:esp32:JTAGAdapter=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=460800,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none,ZigbeeMode=default', // eslint-disable-line max-len
-        linux: 'esp32:esp32:esp32:JTAGAdapter=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=460800,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none,ZigbeeMode=default', // eslint-disable-line max-len
-        win32: 'esp32:esp32:esp32:JTAGAdapter=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none,ZigbeeMode=default' // eslint-disable-line max-len
+        darwin: 'esp32:esp32:esp32s3:JTAGAdapter=default,PSRAM=disabled,FlashMode=qio,FlashSize=4M,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,UploadSpeed=460800,DebugLevel=none,EraseFlash=none,ZigbeeMode=default', // eslint-disable-line max-len
+        linux: 'esp32:esp32:esp32s3:JTAGAdapter=default,PSRAM=disabled,FlashMode=qio,FlashSize=4M,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,UploadSpeed=460800,DebugLevel=none,EraseFlash=none,ZigbeeMode=default', // eslint-disable-line max-len
+        win32: 'esp32:esp32:esp32s3:JTAGAdapter=default,PSRAM=disabled,FlashMode=qio,FlashSize=4M,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,UploadSpeed=921600,DebugLevel=none,EraseFlash=none,ZigbeeMode=default' // eslint-disable-line max-len
     }
 };
 
@@ -76,18 +82,18 @@ const Pins = {
     IO17: '17',
     IO18: '18',
     IO19: '19',
+    IO20: '20',
     IO21: '21',
-    IO22: '22',
-    IO23: '23',
-    IO25: '25',
-    IO26: '26',
-    IO27: '27',
-    IO32: '32',
-    IO33: '33',
-    IO34: '34',
     IO35: '35',
     IO36: '36',
-    IO39: '39'
+    IO37: '37',
+    IO38: '38',
+    IO39: '39',
+    IO40: '40',
+    IO41: '41',
+    IO42: '42',
+    IO43: '43',
+    IO44: '44'
 };
 
 const Level = {
@@ -138,9 +144,9 @@ const DataType = {
 };
 
 /**
- * Manage communication with a Arduino esp32 peripheral over a OpenBlock Link client socket.
+ * Manage communication with a Arduino esp32-S3 peripheral over a OpenBlock Link client socket.
  */
-class ArduinoEsp32 extends CommonPeripheral{
+class ArduinoEsp32S3 extends CommonPeripheral{
     /**
      * Construct a Arduino communication object.
      * @param {Runtime} runtime - the OpenBlock runtime
@@ -153,14 +159,14 @@ class ArduinoEsp32 extends CommonPeripheral{
 }
 
 /**
- * OpenBlock blocks to interact with a Arduino esp32 peripheral.
+ * OpenBlock blocks to interact with a Arduino esp32-S3 peripheral.
  */
-class OpenBlockArduinoEsp32Device {
+class OpenBlockArduinoEsp32S3Device {
     /**
      * @return {string} - the ID of this extension.
      */
     get DEVICE_ID () {
-        return 'arduinoEsp32';
+        return 'arduinoEsp32S3';
     }
 
     get PINS_MENU () {
@@ -189,31 +195,30 @@ class OpenBlockArduinoEsp32Device {
                 text: 'IO5',
                 value: Pins.IO5
             },
-            // Pins 6 to 11 are used by the ESP32 Flash, not recommended for general use.
-            // {
-            //     text: 'IO6',
-            //     value: Pins.IO6
-            // },
-            // {
-            //     text: 'IO7',
-            //     value: Pins.IO7
-            // },
-            // {
-            //     text: 'IO8',
-            //     value: Pins.IO8
-            // },
-            // {
-            //     text: 'IO9',
-            //     value: Pins.IO9
-            // },
-            // {
-            //     text: 'IO10',
-            //     value: Pins.IO10
-            // },
-            // {
-            //     text: 'IO11',
-            //     value: Pins.IO11
-            // },
+            {
+                text: 'IO6',
+                value: Pins.IO6
+            },
+            {
+                text: 'IO7',
+                value: Pins.IO7
+            },
+            {
+                text: 'IO8',
+                value: Pins.IO8
+            },
+            {
+                text: 'IO9',
+                value: Pins.IO9
+            },
+            {
+                text: 'IO10',
+                value: Pins.IO10
+            },
+            {
+                text: 'IO11',
+                value: Pins.IO11
+            },
             {
                 text: 'IO12',
                 value: Pins.IO12
@@ -247,62 +252,96 @@ class OpenBlockArduinoEsp32Device {
                 value: Pins.IO19
             },
             {
+                text: 'IO20',
+                value: Pins.IO20
+            },
+            {
                 text: 'IO21',
                 value: Pins.IO21
             },
+            // IO35-37 are used by octal flash, not recommended for general use.
+            // {
+            //     text: 'IO35',
+            //     value: Pins.IO35
+            // },
+            // {
+            //     text: 'IO36',
+            //     value: Pins.IO36
+            // },
+            // {
+            //     text: 'IO37',
+            //     value: Pins.IO37
+            // },
             {
-                text: 'IO22',
-                value: Pins.IO22
-            },
-            {
-                text: 'IO23',
-                value: Pins.IO23
-            },
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            },
-            {
-                text: 'IO34',
-                value: Pins.IO34
-            },
-            {
-                text: 'IO35',
-                value: Pins.IO35
-            },
-            {
-                text: 'IO36',
-                value: Pins.IO36
+                text: 'IO38',
+                value: Pins.IO38
             },
             {
                 text: 'IO39',
                 value: Pins.IO39
+            },
+            {
+                text: 'IO40',
+                value: Pins.IO40
+            },
+            {
+                text: 'IO41',
+                value: Pins.IO41
+            },
+            {
+                text: 'IO42',
+                value: Pins.IO42
+            },
+            {
+                text: 'IO43',
+                value: Pins.IO43
+            },
+            {
+                text: 'IO44',
+                value: Pins.IO44
             }
         ];
     }
 
-    get OUT_PINS_MENU () {
+    get MODE_MENU () {
         return [
             {
-                text: 'IO0',
-                value: Pins.IO0
+                text: formatMessage({
+                    id: 'arduinoEsp32S3.modeMenu.input',
+                    default: 'input',
+                    description: 'label for input pin mode'
+                }),
+                value: Mode.Input
             },
+            {
+                text: formatMessage({
+                    id: 'arduinoEsp32S3.modeMenu.output',
+                    default: 'output',
+                    description: 'label for output pin mode'
+                }),
+                value: Mode.Output
+            },
+            {
+                text: formatMessage({
+                    id: 'arduinoEsp32S3.modeMenu.inputPullup',
+                    default: 'input-pullup',
+                    description: 'label for input-pullup pin mode'
+                }),
+                value: Mode.InputPullup
+            },
+            {
+                text: formatMessage({
+                    id: 'arduinoEsp32S3.modeMenu.inputPulldown',
+                    default: 'input-pulldown',
+                    description: 'label for input-pulldown pin mode'
+                }),
+                value: Mode.InputPulldown
+            }
+        ];
+    }
+
+    get ANALOG_PINS_MENU () {
+        return [
             {
                 text: 'IO1',
                 value: Pins.IO1
@@ -323,31 +362,30 @@ class OpenBlockArduinoEsp32Device {
                 text: 'IO5',
                 value: Pins.IO5
             },
-            // Pins 6 to 11 are used by the ESP32 Flash, not recommended for general use.
-            // {
-            //     text: 'IO6',
-            //     value: Pins.IO6
-            // },
-            // {
-            //     text: 'IO7',
-            //     value: Pins.IO7
-            // },
-            // {
-            //     text: 'IO8',
-            //     value: Pins.IO8
-            // },
-            // {
-            //     text: 'IO9',
-            //     value: Pins.IO9
-            // },
-            // {
-            //     text: 'IO10',
-            //     value: Pins.IO10
-            // },
-            // {
-            //     text: 'IO11',
-            //     value: Pins.IO11
-            // },
+            {
+                text: 'IO6',
+                value: Pins.IO6
+            },
+            {
+                text: 'IO7',
+                value: Pins.IO7
+            },
+            {
+                text: 'IO8',
+                value: Pins.IO8
+            },
+            {
+                text: 'IO9',
+                value: Pins.IO9
+            },
+            {
+                text: 'IO10',
+                value: Pins.IO10
+            },
+            {
+                text: 'IO11',
+                value: Pins.IO11
+            },
             {
                 text: 'IO12',
                 value: Pins.IO12
@@ -381,142 +419,8 @@ class OpenBlockArduinoEsp32Device {
                 value: Pins.IO19
             },
             {
-                text: 'IO21',
-                value: Pins.IO21
-            },
-            {
-                text: 'IO22',
-                value: Pins.IO22
-            },
-            {
-                text: 'IO23',
-                value: Pins.IO23
-            },
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            }
-        ];
-    }
-
-    get MODE_MENU () {
-        return [
-            {
-                text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.input',
-                    default: 'input',
-                    description: 'label for input pin mode'
-                }),
-                value: Mode.Input
-            },
-            {
-                text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.output',
-                    default: 'output',
-                    description: 'label for output pin mode'
-                }),
-                value: Mode.Output
-            },
-            {
-                text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.inputPullup',
-                    default: 'input-pullup',
-                    description: 'label for input-pullup pin mode'
-                }),
-                value: Mode.InputPullup
-            },
-            {
-                text: formatMessage({
-                    id: 'arduinoEsp32.modeMenu.inputPulldown',
-                    default: 'input-pulldown',
-                    description: 'label for input-pulldown pin mode'
-                }),
-                value: Mode.InputPulldown
-            }
-        ];
-    }
-
-    get ANALOG_PINS_MENU () {
-        return [
-            {
-                text: 'IO0',
-                value: Pins.IO0
-            },
-            {
-                text: 'IO2',
-                value: Pins.IO2
-            },
-            {
-                text: 'IO4',
-                value: Pins.IO4
-            },
-            {
-                text: 'IO12',
-                value: Pins.IO12
-            },
-            {
-                text: 'IO13',
-                value: Pins.IO13
-            },
-            {
-                text: 'IO14',
-                value: Pins.IO14
-            },
-            {
-                text: 'IO15',
-                value: Pins.IO15
-            },
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
-            },
-            {
-                text: 'IO34',
-                value: Pins.IO34
-            },
-            {
-                text: 'IO35',
-                value: Pins.IO35
-            },
-            {
-                text: 'IO36',
-                value: Pins.IO36
-            },
-            {
-                text: 'IO39',
-                value: Pins.IO39
+                text: 'IO20',
+                value: Pins.IO20
             }
         ];
     }
@@ -525,7 +429,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.levelMenu.high',
+                    id: 'arduinoEsp32S3.levelMenu.high',
                     default: 'high',
                     description: 'label for high level'
                 }),
@@ -533,7 +437,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.levelMenu.low',
+                    id: 'arduinoEsp32S3.levelMenu.low',
                     default: 'low',
                     description: 'label for low level'
                 }),
@@ -542,32 +446,51 @@ class OpenBlockArduinoEsp32Device {
         ];
     }
 
-    get DAC_PINS_MENU () {
-        return [
-            {
-                text: 'IO25',
-                value: Pins.IO25
-            },
-            {
-                text: 'IO26',
-                value: Pins.IO26
-            }
-        ];
-    }
-
     get TOUCH_PINS_MENU () {
         return [
             {
-                text: 'IO0',
-                value: Pins.IO0
+                text: 'IO1',
+                value: Pins.IO1
             },
             {
                 text: 'IO2',
                 value: Pins.IO2
             },
             {
+                text: 'IO3',
+                value: Pins.IO3
+            },
+            {
                 text: 'IO4',
                 value: Pins.IO4
+            },
+            {
+                text: 'IO5',
+                value: Pins.IO5
+            },
+            {
+                text: 'IO6',
+                value: Pins.IO6
+            },
+            {
+                text: 'IO7',
+                value: Pins.IO7
+            },
+            {
+                text: 'IO8',
+                value: Pins.IO8
+            },
+            {
+                text: 'IO9',
+                value: Pins.IO9
+            },
+            {
+                text: 'IO10',
+                value: Pins.IO10
+            },
+            {
+                text: 'IO11',
+                value: Pins.IO11
             },
             {
                 text: 'IO12',
@@ -584,18 +507,6 @@ class OpenBlockArduinoEsp32Device {
             {
                 text: 'IO15',
                 value: Pins.IO15
-            },
-            {
-                text: 'IO27',
-                value: Pins.IO27
-            },
-            {
-                text: 'IO32',
-                value: Pins.IO32
-            },
-            {
-                text: 'IO33',
-                value: Pins.IO33
             }
         ];
     }
@@ -604,7 +515,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.risingEdge',
+                    id: 'arduinoEsp32S3.InterrupModeMenu.risingEdge',
                     default: 'rising edge',
                     description: 'label for rising edge interrup'
                 }),
@@ -612,7 +523,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.fallingEdge',
+                    id: 'arduinoEsp32S3.InterrupModeMenu.fallingEdge',
                     default: 'falling edge',
                     description: 'label for falling edge interrup'
                 }),
@@ -620,7 +531,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.changeEdge',
+                    id: 'arduinoEsp32S3.InterrupModeMenu.changeEdge',
                     default: 'change edge',
                     description: 'label for change edge interrup'
                 }),
@@ -628,7 +539,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.low',
+                    id: 'arduinoEsp32S3.InterrupModeMenu.low',
                     default: 'low level',
                     description: 'label for low level interrup'
                 }),
@@ -636,7 +547,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.InterrupModeMenu.high',
+                    id: 'arduinoEsp32S3.InterrupModeMenu.high',
                     default: 'high level',
                     description: 'label for high level interrup'
                 }),
@@ -699,7 +610,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.eolMenu.warp',
+                    id: 'arduinoEsp32S3.eolMenu.warp',
                     default: 'warp',
                     description: 'label for warp print'
                 }),
@@ -707,7 +618,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.eolMenu.noWarp',
+                    id: 'arduinoEsp32S3.eolMenu.noWarp',
                     default: 'no-warp',
                     description: 'label for no warp print'
                 }),
@@ -720,7 +631,7 @@ class OpenBlockArduinoEsp32Device {
         return [
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.integer',
+                    id: 'arduinoEsp32S3.dataTypeMenu.integer',
                     default: 'integer',
                     description: 'label for integer'
                 }),
@@ -728,7 +639,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.decimal',
+                    id: 'arduinoEsp32S3.dataTypeMenu.decimal',
                     default: 'decimal',
                     description: 'label for decimal number'
                 }),
@@ -736,7 +647,7 @@ class OpenBlockArduinoEsp32Device {
             },
             {
                 text: formatMessage({
-                    id: 'arduinoEsp32.dataTypeMenu.string',
+                    id: 'arduinoEsp32S3.dataTypeMenu.string',
                     default: 'string',
                     description: 'label for string'
                 }),
@@ -757,8 +668,8 @@ class OpenBlockArduinoEsp32Device {
          */
         this.runtime = runtime;
 
-        // Create a new Arduino esp32 peripheral instance
-        this._peripheral = new ArduinoEsp32(this.runtime, this.DEVICE_ID, originalDeviceId);
+        // Create a new Arduino esp32-s3 peripheral instance
+        this._peripheral = new ArduinoEsp32S3(this.runtime, this.DEVICE_ID, originalDeviceId);
     }
 
     /**
@@ -769,9 +680,9 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'pin',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.pins',
+                    id: 'arduinoEsp32S3.category.pins',
                     default: 'Pins',
-                    description: 'The name of the esp32 arduino device pin category'
+                    description: 'The name of the esp32-s3 arduino device pin category'
                 }),
                 color1: '#4C97FF',
                 color2: '#3373CC',
@@ -781,16 +692,16 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'setPinMode',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.setPinMode',
+                            id: 'arduinoEsp32S3.pins.setPinMode',
                             default: 'set pin [PIN] mode [MODE]',
-                            description: 'arduinoEsp32 set pin mode'
+                            description: 'arduinoEsp32S3 set pin mode'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             },
                             MODE: {
                                 type: ArgumentType.STRING,
@@ -802,16 +713,16 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'setDigitalOutput',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.setDigitalOutput',
+                            id: 'arduinoEsp32S3.pins.setDigitalOutput',
                             default: 'set digital pin [PIN] out [LEVEL]',
-                            description: 'arduinoEsp32 set digital pin out'
+                            description: 'arduinoEsp32S3 set digital pin out'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO4
+                                menu: 'pins',
+                                defaultValue: Pins.IO1
                             },
                             LEVEL: {
                                 type: ArgumentType.STRING,
@@ -831,8 +742,8 @@ class OpenBlockArduinoEsp32Device {
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO4
+                                menu: 'pins',
+                                defaultValue: Pins.IO1
                             },
                             OUT: {
                                 type: ArgumentType.UINT8_NUMBER,
@@ -840,73 +751,52 @@ class OpenBlockArduinoEsp32Device {
                             }
                         }
                     },
-                    {
-
-                        opcode: 'esp32SetDACOutput',
-                        text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32SetDACOutput',
-                            default: 'set dac pin [PIN] out [OUT]',
-                            description: 'arduinoEsp32 set dac pin out'
-                        }),
-                        blockType: BlockType.COMMAND,
-                        arguments: {
-                            PIN: {
-                                type: ArgumentType.STRING,
-                                menu: 'dacPins',
-                                defaultValue: Pins.IO25
-                            },
-                            OUT: {
-                                type: ArgumentType.UINT8_NUMBER,
-                                defaultValue: '0'
-                            }
-                        }
-                    },
                     '---',
                     {
                         opcode: 'readDigitalPin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.readDigitalPin',
+                            id: 'arduinoEsp32S3.pins.readDigitalPin',
                             default: 'read digital pin [PIN]',
-                            description: 'arduinoEsp32 read digital pin'
+                            description: 'arduinoEsp32S3 read digital pin'
                         }),
                         blockType: BlockType.BOOLEAN,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             }
                         }
                     },
                     {
                         opcode: 'readAnalogPin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.readAnalogPin',
+                            id: 'arduinoEsp32S3.pins.readAnalogPin',
                             default: 'read analog pin [PIN]',
-                            description: 'arduinoEsp32 read analog pin'
+                            description: 'arduinoEsp32S3 read analog pin'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'analogPins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             }
                         }
                     },
                     {
                         opcode: 'esp32ReadTouchPin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32ReadTouchPin',
+                            id: 'arduinoEsp32S3.pins.esp32ReadTouchPin',
                             default: 'read touch pin [PIN]',
-                            description: 'arduinoEsp32 read touch pin'
+                            description: 'arduinoEsp32S3 read touch pin'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'touchPins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             }
                         }
                     },
@@ -923,8 +813,8 @@ class OpenBlockArduinoEsp32Device {
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
-                                menu: 'outPins',
-                                defaultValue: Pins.IO4
+                                menu: 'pins',
+                                defaultValue: Pins.IO1
                             },
                             OUT: {
                                 type: ArgumentType.HALF_ANGLE,
@@ -937,16 +827,16 @@ class OpenBlockArduinoEsp32Device {
 
                         opcode: 'esp32AttachInterrupt',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32AttachInterrupt',
+                            id: 'arduinoEsp32S3.pins.esp32AttachInterrupt',
                             default: 'attach interrupt pin [PIN] mode [MODE] executes',
-                            description: 'arduinoEsp32 attach interrupt'
+                            description: 'arduinoEsp32S3 attach interrupt'
                         }),
                         blockType: BlockType.CONDITIONAL,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             },
                             MODE: {
                                 type: ArgumentType.STRING,
@@ -960,16 +850,16 @@ class OpenBlockArduinoEsp32Device {
 
                         opcode: 'esp32DetachInterrupt',
                         text: formatMessage({
-                            id: 'arduinoEsp32.pins.esp32DetachInterrupt',
+                            id: 'arduinoEsp32S3.pins.esp32DetachInterrupt',
                             default: 'detach interrupt pin [PIN]',
-                            description: 'arduinoEsp32 detach interrupt'
+                            description: 'arduinoEsp32S3 detach interrupt'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
                                 menu: 'pins',
-                                defaultValue: Pins.IO4
+                                defaultValue: Pins.IO1
                             }
                         },
                         programMode: [ProgramModeType.UPLOAD]
@@ -978,9 +868,6 @@ class OpenBlockArduinoEsp32Device {
                 menus: {
                     pins: {
                         items: this.PINS_MENU
-                    },
-                    outPins: {
-                        items: this.OUT_PINS_MENU
                     },
                     mode: {
                         items: this.MODE_MENU
@@ -991,9 +878,6 @@ class OpenBlockArduinoEsp32Device {
                     level: {
                         acceptReporters: true,
                         items: this.LEVEL_MENU
-                    },
-                    dacPins: {
-                        items: this.DAC_PINS_MENU
                     },
                     touchPins: {
                         items: this.TOUCH_PINS_MENU
@@ -1006,7 +890,7 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'serial',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.serial',
+                    id: 'arduinoEsp32S3.category.serial',
                     default: 'Serial',
                     description: 'The name of the arduino esp32 device serial category'
                 }),
@@ -1018,9 +902,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialBegin',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialBegin',
+                            id: 'arduinoEsp32S3.serial.multiSerialBegin',
                             default: 'serial [NO] begin baudrate [VALUE]',
-                            description: 'arduinoEsp32 multi serial begin'
+                            description: 'arduinoEsp32S3 multi serial begin'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
@@ -1040,9 +924,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialPrint',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialPrint',
+                            id: 'arduinoEsp32S3.serial.multiSerialPrint',
                             default: 'serial [NO] print [VALUE] [EOL]',
-                            description: 'arduinoEsp32 multi serial print'
+                            description: 'arduinoEsp32S3 multi serial print'
                         }),
                         blockType: BlockType.COMMAND,
                         arguments: {
@@ -1066,9 +950,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialAvailable',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialAvailable',
+                            id: 'arduinoEsp32S3.serial.multiSerialAvailable',
                             default: 'serial [NO] available data length',
-                            description: 'arduinoEsp32 multi serial available data length'
+                            description: 'arduinoEsp32S3 multi serial available data length'
                         }),
                         arguments: {
                             NO: {
@@ -1083,9 +967,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'multiSerialReadAByte',
                         text: formatMessage({
-                            id: 'arduinoEsp32.serial.multiSerialReadAByte',
+                            id: 'arduinoEsp32S3.serial.multiSerialReadAByte',
                             default: 'serial [NO] read a byte',
-                            description: 'arduinoEsp32 multi serial read a byte'
+                            description: 'arduinoEsp32S3 multi serial read a byte'
                         }),
                         arguments: {
                             NO: {
@@ -1113,7 +997,7 @@ class OpenBlockArduinoEsp32Device {
             {
                 id: 'data',
                 name: formatMessage({
-                    id: 'arduinoEsp32.category.data',
+                    id: 'arduinoEsp32S3.category.data',
                     default: 'Data',
                     description: 'The name of the arduino esp32 device data category'
                 }),
@@ -1125,9 +1009,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataMap',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataMap',
+                            id: 'arduinoEsp32S3.data.dataMap',
                             default: 'map [DATA] from ([ARG0], [ARG1]) to ([ARG2], [ARG3])',
-                            description: 'arduinoEsp32 data map'
+                            description: 'arduinoEsp32S3 data map'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1157,9 +1041,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConstrain',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConstrain',
+                            id: 'arduinoEsp32S3.data.dataConstrain',
                             default: 'constrain [DATA] between ([ARG0], [ARG1])',
-                            description: 'arduinoEsp32 data constrain'
+                            description: 'arduinoEsp32S3 data constrain'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1182,9 +1066,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvert',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvert',
+                            id: 'arduinoEsp32S3.data.dataConvert',
                             default: 'convert [DATA] to [TYPE]',
-                            description: 'arduinoEsp32 data convert'
+                            description: 'arduinoEsp32S3 data convert'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1203,9 +1087,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvertASCIICharacter',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvertASCIICharacter',
+                            id: 'arduinoEsp32S3.data.dataConvertASCIICharacter',
                             default: 'convert [DATA] to ASCII character',
-                            description: 'arduinoEsp32 data convert to ASCII character'
+                            description: 'arduinoEsp32S3 data convert to ASCII character'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1219,9 +1103,9 @@ class OpenBlockArduinoEsp32Device {
                     {
                         opcode: 'dataConvertASCIINumber',
                         text: formatMessage({
-                            id: 'arduinoEsp32.data.dataConvertASCIINumber',
+                            id: 'arduinoEsp32S3.data.dataConvertASCIINumber',
                             default: 'convert [DATA] to ASCII nubmer',
-                            description: 'arduinoEsp32 data convert to ASCII nubmer'
+                            description: 'arduinoEsp32S3 data convert to ASCII nubmer'
                         }),
                         blockType: BlockType.REPORTER,
                         arguments: {
@@ -1301,4 +1185,4 @@ class OpenBlockArduinoEsp32Device {
     }
 }
 
-module.exports = OpenBlockArduinoEsp32Device;
+module.exports = OpenBlockArduinoEsp32S3Device;

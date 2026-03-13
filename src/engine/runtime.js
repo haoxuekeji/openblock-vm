@@ -87,27 +87,6 @@ const ArgumentTypeMap = (() => {
             fieldName: 'NUM'
         }
     };
-    map[ArgumentType.STRING] = {
-        shadow: {
-            type: 'text',
-            fieldName: 'TEXT'
-        }
-    };
-    map[ArgumentType.BOOLEAN] = {
-        check: 'Boolean'
-    };
-    map[ArgumentType.MATRIX] = {
-        shadow: {
-            type: 'matrix',
-            fieldName: 'MATRIX'
-        }
-    };
-    map[ArgumentType.NOTE] = {
-        shadow: {
-            type: 'note',
-            fieldName: 'NOTE'
-        }
-    };
     map[ArgumentType.INTEGER_NUMBER] = {
         shadow: {
             type: 'math_integer',
@@ -184,6 +163,33 @@ const ArgumentTypeMap = (() => {
         shadow: {
             type: 'math_n100to100_number',
             fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.STRING] = {
+        shadow: {
+            type: 'text',
+            fieldName: 'TEXT'
+        }
+    };
+    map[ArgumentType.BOOLEAN] = {
+        check: 'Boolean'
+    };
+    map[ArgumentType.MATRIX] = {
+        shadow: {
+            type: 'matrix',
+            fieldName: 'MATRIX'
+        }
+    };
+    map[ArgumentType.MATRIX8X12] = {
+        shadow: {
+            type: 'matrix8x12',
+            fieldName: 'MATRIX'
+        }
+    };
+    map[ArgumentType.NOTE] = {
+        shadow: {
+            type: 'note',
+            fieldName: 'NOTE'
         }
     };
     return map;
