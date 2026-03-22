@@ -210,8 +210,11 @@ class WebBLE {
             requestOptions.optionalServices = this._peripheralOptions.optionalServices;
         }
 
+        console.log('[WebBLE] requestDevice with options:', JSON.stringify(requestOptions));
+
         return navigator.bluetooth.requestDevice(requestOptions)
             .then(device => {
+                console.log('[WebBLE] User selected device:', device.name, device.id);
                 this._device = device;
                 device.addEventListener(
                     'gattserverdisconnected', this.handleDisconnectError.bind(this));
@@ -230,24 +233,29 @@ class WebBLE {
     }
 
     connectPeripheral (id) {
+        console.log('[WebBLE] connectPeripheral called, id:', id, 'device:', this._device ? this._device.name : 'null');
         if (!this._device) {
+            console.warn('[WebBLE] connectPeripheral failed: no device');
             this._handleRequestError(new Error('No device selected'));
             return;
         }
 
         this._device.gatt.connect()
             .then(server => {
+                console.log('[WebBLE] GATT connected successfully');
                 this._server = server;
                 this._connected = true;
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
                 this._connectCallback();
             })
             .catch(e => {
+                console.error('[WebBLE] GATT connect error:', e);
                 this._handleRequestError(e);
             });
     }
 
     disconnect () {
+        console.log('[WebBLE] disconnect called');
         if (this._connected) {
             this._connected = false;
         }
@@ -356,7 +364,8 @@ class WebBLE {
             });
     }
 
-    handleDisconnectError (/* e */) {
+    handleDisconnectError (e) {
+        console.warn('[WebBLE] handleDisconnectError:', e);
         if (!this._connected) return;
         this.disconnect();
         if (this._resetCallback) {
@@ -368,7 +377,8 @@ class WebBLE {
         });
     }
 
-    _handleRequestError (/* e */) {
+    _handleRequestError (e) {
+        console.error('[WebBLE] _handleRequestError:', e);
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
             message: `Scratch lost connection to`,
             deviceId: this._deviceId
@@ -416,8 +426,10 @@ class BLE {
         this._backend = null;
 
         if (BLE._isWebBluetoothSupported()) {
+            console.log('[BLE] Web Bluetooth API is supported, trying browser picker');
             this._tryWebBluetooth();
         } else {
+            console.log('[BLE] Web Bluetooth API not supported, using Scratch Link');
             this._useScratchLink();
         }
     }
@@ -433,18 +445,23 @@ class BLE {
             this._runtime, this._deviceId, this._peripheralOptions,
             this._connectCallback, this._resetCallback
         );
+        // Set backend immediately so connectPeripheral can find it
+        // after PERIPHERAL_LIST_UPDATE is emitted
+        this._backend = webBLE;
+
         webBLE.requestPeripheral()
             .then(() => {
-                // User picked a device, use Web Bluetooth
-                this._backend = webBLE;
+                console.log('[BLE] Web Bluetooth device selected, backend ready');
             })
-            .catch(() => {
+            .catch(e => {
+                console.log('[BLE] Web Bluetooth cancelled or denied:', e, ', falling back to Scratch Link');
                 // User cancelled or permission denied, fall back to Scratch Link
                 this._useScratchLink();
             });
     }
 
     _useScratchLink () {
+        console.log('[BLE] Initializing Scratch Link backend');
         this._backend = new ScratchLinkBLE(
             this._runtime, this._deviceId, this._peripheralOptions,
             this._connectCallback, this._resetCallback
@@ -452,14 +469,19 @@ class BLE {
     }
 
     requestPeripheral () {
+        console.log('[BLE] requestPeripheral, backend:', this._backend ? this._backend.constructor.name : 'null');
         if (this._backend) {
             this._backend.requestPeripheral();
         }
     }
 
     connectPeripheral (id) {
+        const backendName = this._backend ? this._backend.constructor.name : 'null';
+        console.log('[BLE] connectPeripheral, id:', id, ', backend:', backendName);
         if (this._backend) {
             this._backend.connectPeripheral(id);
+        } else {
+            console.error('[BLE] connectPeripheral called but no backend available');
         }
     }
 
