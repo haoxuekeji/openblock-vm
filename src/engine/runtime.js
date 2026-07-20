@@ -1836,7 +1836,7 @@ class Runtime extends EventEmitter {
     connectPeripheral (deviceId, peripheralId, baudrate) {
         deviceId = this.analysisRealDeviceId(deviceId);
 
-        if (this.peripheralExtensions[deviceId]) {           
+        if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].connect(peripheralId, baudrate);
         }
     }
@@ -2593,9 +2593,11 @@ class Runtime extends EventEmitter {
      * @param {string} id id of this device extension.
      * @param {string} xml toolbox xml of this device extension.
      * @param {Array.<string>} library path of this device extension.
+     * @param {Array.<string>} libraryFiles urls of the library .py files, used
+     * by browser-direct uploaders to install them on the board.
      */
-    addDeviceExtension (id, xml, library) {
-        this._loadedDeviceExtensions.set(id, {xml: xml, library: library});
+    addDeviceExtension (id, xml, library, libraryFiles) {
+        this._loadedDeviceExtensions.set(id, {xml: xml, library: library, libraryFiles: libraryFiles});
     }
 
     /**
@@ -2642,6 +2644,20 @@ class Runtime extends EventEmitter {
             }
         });
         return libraries;
+    }
+
+    /**
+     * Get the library file urls of the current loaded device extensions.
+     * @return {Array.<string>} array of library .py file urls.
+     */
+    getCurrentDeviceExtensionLibraryFiles () {
+        const files = [];
+        this._loadedDeviceExtensions.forEach(value => {
+            if (value.libraryFiles) {
+                files.push(...value.libraryFiles);
+            }
+        });
+        return files;
     }
 
     /**
@@ -3063,23 +3079,22 @@ class Runtime extends EventEmitter {
      * @property {string} [label] - the label for this opcode if `labelFn` is absent
      */
     getLabelForOpcode (extendedOpcode) {
-        const categoryAndOpcode = extendedOpcode;
-        const [category, opcode] = StringUtil.splitFirst(categoryAndOpcode, '_');
+        // Device category ids contain underscores (e.g. `microPython_sensor`), so instead of
+        // splitting on the first underscore, match the longest category id prefix.
+        const allCategories = this._blockInfo.concat(this._deviceBlockInfo);
+        for (const categoryInfo of allCategories) {
+            if (!extendedOpcode.startsWith(`${categoryInfo.id}_`)) continue;
 
-        if (!(category && opcode)) return;
+            const opcode = extendedOpcode.substring(categoryInfo.id.length + 1);
+            const block = categoryInfo.blocks.find(b => b.info && b.info.opcode === opcode);
+            if (!block) continue;
 
-        const categoryInfo = this._blockInfo.find(ci => ci.id === category) ||
-            this._deviceBlockInfo.find(ci => ci.id === category);
-        if (!categoryInfo) return;
-
-        const block = categoryInfo.blocks.find(b => b.info.opcode === opcode);
-        if (!block) return;
-
-        // TODO: we may want to format the label in a locale-specific way.
-        return {
-            category: 'extension', // This assumes that all extensions have the same monitor color.
-            label: `${categoryInfo.name}: ${block.info.text}`
-        };
+            // TODO: we may want to format the label in a locale-specific way.
+            return {
+                category: 'extension', // This assumes that all extensions have the same monitor color.
+                label: `${categoryInfo.name}: ${block.info.text}`
+            };
+        }
     }
 
     /**

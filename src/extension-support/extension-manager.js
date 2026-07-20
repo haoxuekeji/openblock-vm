@@ -9,8 +9,26 @@ const maybeFormatMessage = require('../util/maybe-format-message');
 
 const BlockType = require('./block-type');
 
-// Local resources server address
+// Local resources server address, used as fallback when no static
+// resources snapshot is deployed next to the GUI.
 const localResourcesServerUrl = 'http://127.0.0.1:20112/';
+
+/**
+ * Candidate base urls for the external resources, tried in order:
+ * 1. A static snapshot deployed with the GUI (set through the global
+ *    `window.OpenBlockExternalResourcesBase`, e.g. '/external-resources/'),
+ *    which requires no local service at all.
+ * 2. The local openblock-resource server (OpenBlock Link / desktop setup).
+ * @returns {Array.<string>} - the base urls to try.
+ */
+const getResourcesBaseCandidates = () => {
+    const candidates = [];
+    if (typeof window !== 'undefined' && window.OpenBlockExternalResourcesBase) {
+        candidates.push(window.OpenBlockExternalResourcesBase);
+    }
+    candidates.push(localResourcesServerUrl);
+    return candidates;
+};
 
 // These extensions are currently built into the VM repository but should not be loaded at startup.
 // TODO: move these out into a separate repository?
@@ -27,6 +45,10 @@ const builtinExtensions = {
     translate: () => require('../extensions/scratch3_translate'),
     videoSensing: () => require('../extensions/scratch3_video_sensing'),
     makeymakey: () => require('../extensions/scratch3_makeymakey'),
+    mqtt: () => require('../extensions/scratch3_mqtt'),
+    speak: () => require('../extensions/scratch3_speak'),
+    asr: () => require('../extensions/scratch3_asr'),
+    aiChat: () => require('../extensions/scratch3_aichat'),
 
     wedo2: () => require('../extensions/scratch3_wedo2'),
     microbit: () => require('../extensions/scratch3_microbit'),
@@ -53,6 +75,12 @@ const builtinDevices = {
     arduinoUnoR4Wifi: () => require('../devices/arduinoUnoR4Wifi/arduinoUnoR4Wifi'),
     // Esp32
     arduinoEsp32: () => require('../devices/arduinoEsp32/arduinoEsp32'),
+    microPythonEsp32: () => require('../devices/microPythonEsp32/microPythonEsp32'),
+    microPythonEsp32Ble: () => require('../devices/microPythonEsp32Ble/microPythonEsp32Ble'),
+    microPythonEsp32WebSerial: () => require('../devices/microPythonEsp32WebSerial/microPythonEsp32WebSerial'),
+    microPythonEsp32C3: () => require('../devices/microPythonEsp32C3/microPythonEsp32C3'),
+    microPythonEsp32C3Ble: () => require('../devices/microPythonEsp32C3Ble/microPythonEsp32C3Ble'),
+    microPythonEsp32C3WebSerial: () => require('../devices/microPythonEsp32C3WebSerial/microPythonEsp32C3WebSerial'),
     // Esp32-S3
     arduinoEsp32S3: () => require('../devices/arduinoEsp32S3/arduinoEsp32S3'),
     // Esp8266
@@ -292,14 +320,49 @@ class ExtensionManager {
     }
 
     /**
-     * Get unbuild-in devices list from local server.
+     * Fetch a resource index (devices or extensions) trying the static
+     * snapshot first and the local resource server as fallback, with a
+     * fallback to the english index when the current locale has none.
+     * The base url that served the index is remembered so relative urls
+     * inside it can be resolved later.
+     * @param {string} type - 'devices' or 'extensions'.
+     * @returns {Promise} resolves {base, data} or rejects when nothing answered.
+     * @private
+     */
+    _fetchResourceIndex (type) {
+        const locale = formatMessage.setup().locale;
+        const tryFetch = (base, loc) => fetch(`${base}${type}/${loc}.json`)
+            .then(response => {
+                if (response.ok === false) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                this._resourcesBase = base;
+                return {base, data};
+            });
+
+        let chain = Promise.reject(new Error('no resources base'));
+        getResourcesBaseCandidates().forEach(base => {
+            chain = chain
+                .catch(() => tryFetch(base, locale));
+            if (locale !== 'en') {
+                chain = chain.catch(() => tryFetch(base, 'en'));
+            }
+        });
+        return chain;
+    }
+
+    /**
+     * Get unbuild-in devices list from static resources or local server.
      * @returns {Promise} resolved devices list has been fetched or failure
      */
     getDeviceList() {
         return new Promise(resolve => {
-            fetch(`${localResourcesServerUrl}devices/${formatMessage.setup().locale}.json`)
-                .then(response => response.json())
-                .then(devices => {
+            this._fetchResourceIndex('devices')
+                .then(({base, data}) => {
+                    let devices = data;
                     // filter unsupported distribution content
                     let filteredDevices = [];
                     let currentBases = 'none';
@@ -338,14 +401,14 @@ class ExtensionManager {
 
                     devices = filteredDevices.map(dev => {
                         dev.hide = false;
-                        dev.iconURL = localResourcesServerUrl + dev.iconURL;
-                        dev.connectionIconURL = localResourcesServerUrl + dev.connectionIconURL;
-                        dev.connectionSmallIconURL = localResourcesServerUrl + dev.connectionSmallIconURL;
+                        dev.iconURL = base + dev.iconURL;
+                        dev.connectionIconURL = base + dev.connectionIconURL;
+                        dev.connectionSmallIconURL = base + dev.connectionSmallIconURL;
                         return dev;
                     });
                     return resolve(devices);
                 }, err => {
-                    log.warn(`Can not fetch data from local device server: ${err}`);
+                    log.warn(`Can not fetch external devices resource: ${err}`);
                     return resolve();
                 });
         });
@@ -418,14 +481,14 @@ class ExtensionManager {
     }
 
     /**
-     * Get device extensions list from local server.
+     * Get device extensions list from static resources or local server.
      * @returns {Promise} resolved extension list has been fetched or failure
      */
     getDeviceExtensionsList() {
         return new Promise(resolve => {
-            fetch(`${localResourcesServerUrl}extensions/${formatMessage.setup().locale}.json`)
-                .then(response => response.json())
-                .then(extensions => {
+            this._fetchResourceIndex('extensions')
+                .then(({base, data}) => {
+                    let extensions = data;
                     // filter unsupported distribution content
                     let filteredExtensions = [];
                     filteredExtensions = extensions.filter(extension => {
@@ -438,7 +501,7 @@ class ExtensionManager {
                     });
 
                     extensions = filteredExtensions.map(extension => {
-                        extension.iconURL = localResourcesServerUrl + extension.iconURL;
+                        extension.iconURL = base + extension.iconURL;
                         if (this.isDeviceExtensionLoaded(extension.extensionId)) {
                             extension.isLoaded = true;
                         }
@@ -447,7 +510,7 @@ class ExtensionManager {
                     this._deviceExtensionsList = extensions;
                     return resolve(this._deviceExtensionsList);
                 }, err => {
-                    log.warn(`Can not fetch data from local extension server: ${err}`);
+                    log.warn(`Can not fetch external extensions resource: ${err}`);
                     return resolve();
                 });
         });
@@ -485,13 +548,16 @@ class ExtensionManager {
             // Remove null values
             registerUrls = registerUrls.filter(url => url !== null && typeof url !== 'undefined' && url !== '');
 
-            // If it is a local file, add the localhost address in front
-            registerUrls = registerUrls.map(url => {
-                if (!validUrl.isWebUri(url)) {
-                    return localResourcesServerUrl + url;
+            // If it is a relative path, resolve it against the base url
+            // that served the extensions index.
+            const resourcesBase = this._resourcesBase || localResourcesServerUrl;
+            const resolveResourceUrl = url => {
+                if (!validUrl.isWebUri(url) && !url.startsWith('/')) {
+                    return resourcesBase + url;
                 }
                 return url;
-            });
+            };
+            registerUrls = registerUrls.map(resolveResourceUrl);
 
             // clear global register before load external extension.
             global.registerToolboxs = null;
@@ -499,10 +565,15 @@ class ExtensionManager {
             global.registerGenerators = null;
             global.registerBlocksMessages = null;
 
+            // Library .py files a browser-direct uploader (Web Bluetooth /
+            // Web Serial) must install on the board along with the program.
+            const libraryFiles = (deviceExtension.libraryFiles || []).map(resolveResourceUrl);
+
             loadjs(registerUrls, {returnPromise: true})
                 .then(() => {
                     const getToolboxXML = global.registerToolboxs;
-                    this.runtime.addDeviceExtension(deviceExtensionId, getToolboxXML(), deviceExtension.library);
+                    this.runtime.addDeviceExtension(
+                        deviceExtensionId, getToolboxXML(), deviceExtension.library, libraryFiles);
 
                     const deviceExtensionsRegister = {
                         defineBlocks: global.registerBlocks,
