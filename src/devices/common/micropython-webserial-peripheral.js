@@ -3,6 +3,11 @@ const Buffer = require('buffer').Buffer;
 const WebSerial = require('../../io/webserial');
 const MicroPythonBlePeripheral = require('./micropython-ble-peripheral');
 
+// Boot time of the MicroPython firmware after a hard reset.
+const HARD_RESET_BOOT_TIME = 2500;
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
  * Manage communication with a MicroPython peripheral directly over the
  * browser Web Serial API. The whole raw REPL upload and realtime (live)
@@ -16,9 +21,10 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
      * @param {string} deviceId - the id of the extension
      * @param {string} originalDeviceId - the original id of the peripheral
      * @param {Array.<string>} pnpidList - fallback USB pnp id filters for the port chooser.
+     * @param {object} options - construction options passed to the shared raw REPL peripheral.
      */
-    constructor (runtime, deviceId, originalDeviceId, pnpidList = []) {
-        super(runtime, deviceId, originalDeviceId);
+    constructor (runtime, deviceId, originalDeviceId, pnpidList = [], options = {}) {
+        super(runtime, deviceId, originalDeviceId, options);
         this._pnpidList = pnpidList;
     }
 
@@ -119,12 +125,7 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
      * @private
      */
     _onSerialData (data) {
-        const buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-        if (this._uploading || this._liveReady) {
-            this._replBuffer += buffer.toString('latin1');
-            return;
-        }
-        this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA, buffer);
+        this._routeIncoming(Buffer.from(data.buffer, data.byteOffset, data.byteLength));
     }
 
     /**
@@ -134,6 +135,23 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
      */
     _handlePostUploadReboot () {
         return Promise.resolve();
+    }
+
+    /**
+     * Hard reset the board by pulsing the DTR/RTS control lines.
+     * @return {Promise<boolean>} - true when the reset pulse was sent.
+     */
+    async hardReset () {
+        if (!this.isConnected() || !this._serial) return false;
+        this._resetLiveState();
+        await this._serial.hardReset();
+        if (this._runtime.isRealtimeMode()) {
+            this._enqueueLive(async () => {
+                await wait(HARD_RESET_BOOT_TIME);
+                return this._enterLiveMode();
+            });
+        }
+        return true;
     }
 
     /**

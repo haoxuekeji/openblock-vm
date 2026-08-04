@@ -184,6 +184,15 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted =>
             this.emit(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted)
         );
+        this.runtime.on(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM, info => {
+            if (this.listenerCount(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM) === 0) {
+                // No UI is listening to ask the user, keep the legacy
+                // auto-flash behaviour instead of waiting forever.
+                info.respond(true);
+                return;
+            }
+            this.emit(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM, info);
+        });
         this.runtime.on(Runtime.MIC_LISTENING, listening => {
             this.emit(Runtime.MIC_LISTENING, listening);
         });
@@ -299,6 +308,34 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Select the transport used by a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @param {string} transport - transport id.
+     * @return {?string} selected transport id.
+     */
+    setPeripheralTransport (extensionId, transport) {
+        return this.runtime.setPeripheralTransport(extensionId, transport);
+    }
+
+    /**
+     * Get the active transport of a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @return {?string} active transport id.
+     */
+    getPeripheralTransport (extensionId) {
+        return this.runtime.getPeripheralTransport(extensionId);
+    }
+
+    /**
+     * Get available transports of a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @return {Array.<string>} supported transport ids.
+     */
+    getPeripheralTransports (extensionId) {
+        return this.runtime.getPeripheralTransports(extensionId);
+    }
+
+    /**
      * Tell the specified extension to scan for a peripheral.
      * @param {string} extensionId - the id of the extension.
      * @param {bool} listAll - wether list all connectable device.
@@ -344,6 +381,15 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Hard reset the extension's connected peripheral.
+     * @param {string} extensionId - the id of the extension.
+     * @return {Promise<boolean>} - true when the transport supports it.
+     */
+    hardResetPeripheral (extensionId) {
+        return this.runtime.hardResetPeripheral(extensionId);
+    }
+
+    /**
      * Returns whether the extension has a currently connected peripheral.
      * @param {string} extensionId - the id of the extension.
      * @return {boolean} - whether the extension has a connected peripheral.
@@ -360,6 +406,47 @@ class VirtualMachine extends EventEmitter {
      */
     uploadToPeripheral (extensionId, code) {
         return this.runtime.uploadToPeripheral(extensionId, code);
+    }
+
+    /**
+     * List files on the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} directory - board directory.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (extensionId, directory) {
+        return this.runtime.listBoardFiles(extensionId, directory);
+    }
+
+    /**
+     * Read a file from the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @return {Promise<object>}
+     */
+    readBoardFile (extensionId, filePath) {
+        return this.runtime.readBoardFile(extensionId, filePath);
+    }
+
+    /**
+     * Remove a file from the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (extensionId, filePath) {
+        return this.runtime.removeBoardFile(extensionId, filePath);
+    }
+
+    /**
+     * Write a file to the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file content.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (extensionId, filePath, contentBase64) {
+        return this.runtime.writeBoardFile(extensionId, filePath, contentBase64);
     }
 
     /**

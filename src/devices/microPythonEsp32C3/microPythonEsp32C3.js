@@ -23,7 +23,8 @@ const PNPID_LIST = [
 const DIVECE_OPT = {
     type: 'microPython',
     chip: 'esp32c3',
-    firmwarePrefix: 'esp32c3-'
+    firmwarePrefix: 'esp32c3-ble-openblock',
+    flashAddress: '0x0'
 };
 
 /**

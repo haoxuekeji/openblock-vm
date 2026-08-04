@@ -124,6 +124,17 @@ class Serialport extends JSONRPC {
     }
 
     /**
+     * Hard reset the board by pulsing the serial DTR/RTS control lines.
+     * @return {Promise} - a promise from the remote request.
+     */
+    hardReset () {
+        return this.sendRemoteRequest('hardReset')
+            .catch(e => {
+                this.handleDisconnectError(e);
+            });
+    }
+
+    /**
      * Write data to the serialport.
      * @param {string} message - the message to send.
      * @param {string} encoding - the message encoding type.
@@ -183,6 +194,47 @@ class Serialport extends JSONRPC {
     }
 
     /**
+     * List files on a MicroPython board via OpenBlock Link.
+     * @param {string} directory - board directory.
+     * @param {object} config - device uploader config.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (directory, config) {
+        return this.sendRemoteRequest('listBoardFiles', {directory, config});
+    }
+
+    /**
+     * Read a MicroPython board file via OpenBlock Link.
+     * @param {string} path - board path.
+     * @param {object} config - device uploader config.
+     * @return {Promise<object>}
+     */
+    readBoardFile (path, config) {
+        return this.sendRemoteRequest('readBoardFile', {path, config});
+    }
+
+    /**
+     * Remove a MicroPython board file via OpenBlock Link.
+     * @param {string} path - board path.
+     * @param {object} config - device uploader config.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (path, config) {
+        return this.sendRemoteRequest('removeBoardFile', {path, config});
+    }
+
+    /**
+     * Write a MicroPython board file via OpenBlock Link.
+     * @param {string} path - board path.
+     * @param {string} contentBase64 - file content.
+     * @param {object} config - device uploader config.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (path, contentBase64, config) {
+        return this.sendRemoteRequest('writeBoardFile', {path, contentBase64, config});
+    }
+
+    /**
      * Handle a received call from the socket.
      * @param {string} method - a received method label.
      * @param {object} params - a received list of parameters.
@@ -233,6 +285,23 @@ class Serialport extends JSONRPC {
             this._runtime.emit(
                 this._runtime.constructor.PERIPHERAL_UPLOAD_SUCCESS, params ? params.aborted : false);
             break;
+        case 'uploadFirmwareConfirm': {
+            // The link server asks whether it may reflash the MicroPython
+            // firmware, which erases every file stored on the board. The
+            // answer is wrapped in an object because a plain boolean would
+            // be dropped by the falsy-checks in the jsonrpc transports.
+            const eventName = this._runtime.constructor.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM;
+            if (this._runtime.listenerCount(eventName) === 0) {
+                // No UI is listening to ask the user, keep the legacy
+                // auto-flash behaviour.
+                return {confirmed: true};
+            }
+            return new Promise(resolve => {
+                this._runtime.emit(eventName, {
+                    respond: confirmed => resolve({confirmed: Boolean(confirmed)})
+                });
+            });
+        }
         case 'ping':
             return 42;
         }

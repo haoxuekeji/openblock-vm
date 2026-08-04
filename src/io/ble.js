@@ -1,5 +1,8 @@
 const JSONRPC = require('../util/jsonrpc');
 
+const WEB_BLE_CONNECT_TIMEOUT = 15000;
+const WEB_BLE_NOTIFICATION_SETUP_TIMEOUT = 2500;
+
 /**
  * Scratch Link based BLE backend using WebSocket + JSON-RPC.
  * This is the original implementation that communicates through Scratch Link.
@@ -194,6 +197,9 @@ class WebBLE {
         this._server = null;
         this._services = {};
         this._characteristics = {};
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
+        this._connectAttempt = 0;
     }
 
     requestPeripheral () {
@@ -232,42 +238,142 @@ class WebBLE {
             });
     }
 
-    connectPeripheral (id) {
+    connectPeripheral (id, options = {}) {
+        const silent = options.silent === true;
         console.log('[WebBLE] connectPeripheral called, id:', id, 'device:', this._device ? this._device.name : 'null');
         if (!this._device) {
+            const error = new Error('No device selected');
             console.warn('[WebBLE] connectPeripheral failed: no device');
-            this._handleRequestError(new Error('No device selected'));
-            return;
+            if (!silent) {
+                this._handleRequestError(error);
+                return Promise.resolve(false);
+            }
+            return Promise.reject(error);
         }
 
-        this._device.gatt.connect()
+        // A soft reboot invalidates all GATT service/characteristic handles.
+        // Never reuse the cache from the previous connection.
+        this._connectAttempt += 1;
+        const connectAttempt = this._connectAttempt;
+        this._silentConnect = silent;
+        this._server = null;
+        this._services = {};
+        this._characteristics = {};
+
+        let timeoutId = null;
+        const connectPromise = this._device.gatt.connect()
             .then(server => {
+                if (connectAttempt !== this._connectAttempt) {
+                    throw new Error('Bluetooth connection cancelled');
+                }
                 console.log('[WebBLE] GATT connected successfully');
                 this._server = server;
                 this._connected = true;
+                this._expectedDisconnect = false;
+
+                // Some Chrome/Web Bluetooth combinations establish GATT
+                // immediately but leave startNotifications() pending for a
+                // long time even though notifications become usable. Start
+                // notification setup and wait briefly for real failures, but
+                // do not let that browser promise block the connection modal
+                // until the global connection timeout.
+                let notificationTimeoutId = null;
+                const notificationSetup = Promise.resolve(this._connectCallback())
+                    .then(() => {
+                        console.log('[WebBLE] Notification setup completed');
+                        return true;
+                    });
+                const notificationTimeout = new Promise(resolve => {
+                    notificationTimeoutId = window.setTimeout(() => {
+                        console.warn('[WebBLE] Notification setup still pending; continuing with GATT connection');
+                        resolve(false);
+                    }, WEB_BLE_NOTIFICATION_SETUP_TIMEOUT);
+                });
+                return Promise.race([notificationSetup, notificationTimeout])
+                    .then(result => {
+                        window.clearTimeout(notificationTimeoutId);
+                        return result;
+                    });
+            })
+            .then(() => {
+                if (connectAttempt !== this._connectAttempt) {
+                    throw new Error('Bluetooth connection cancelled');
+                }
+                // The transport is only usable after notification setup in
+                // the peripheral connect callback has completed.
+                if (!this._connected) {
+                    throw new Error('Bluetooth notifications could not be started');
+                }
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
-                this._connectCallback();
+                this._silentConnect = false;
+                return true;
+            });
+
+        const timeoutPromise = new Promise((resolve, reject) => {
+            timeoutId = window.setTimeout(() => {
+                if (connectAttempt === this._connectAttempt) {
+                    this._connectAttempt += 1;
+                }
+                reject(new Error('Bluetooth connection timed out'));
+            }, WEB_BLE_CONNECT_TIMEOUT);
+        });
+
+        return Promise.race([connectPromise, timeoutPromise])
+            .then(result => {
+                window.clearTimeout(timeoutId);
+                return result;
             })
             .catch(e => {
+                window.clearTimeout(timeoutId);
                 console.error('[WebBLE] GATT connect error:', e);
-                this._handleRequestError(e);
+                const suppressError = this._silentConnect || silent;
+                if (connectAttempt === this._connectAttempt) {
+                    this._connectAttempt += 1;
+                }
+                this._connected = false;
+                this._silentConnect = false;
+                if (this._device && this._device.gatt.connected) {
+                    this._device.gatt.disconnect();
+                }
+                this._server = null;
+                this._services = {};
+                this._characteristics = {};
+                if (!suppressError) {
+                    this._handleRequestError(e);
+                    return false;
+                }
+                throw e;
             });
     }
 
-    disconnect () {
+    /**
+     * Mark the next GATT disconnect as part of an intentional board reboot.
+     * This suppresses the normal connection-lost event while auto reconnect
+     * is in progress.
+     */
+    expectDisconnect () {
+        this._expectedDisconnect = true;
+    }
+
+    disconnect (options = {}) {
+        const silent = options === true || options.silent === true;
         console.log('[WebBLE] disconnect called');
-        if (this._connected) {
-            this._connected = false;
-        }
+        this._connectAttempt += 1;
+        this._connected = false;
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
         if (this._device && this._device.gatt.connected) {
             this._device.gatt.disconnect();
         }
         if (this._discoverTimeoutID) {
             window.clearTimeout(this._discoverTimeoutID);
         }
+        this._server = null;
         this._services = {};
         this._characteristics = {};
-        this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
+        if (!silent) {
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
+        }
     }
 
     isConnected () {
@@ -311,9 +417,6 @@ class WebBLE {
                     }
                 });
                 return characteristic.startNotifications();
-            })
-            .catch(e => {
-                this.handleDisconnectError(e);
             });
     }
 
@@ -367,6 +470,10 @@ class WebBLE {
     handleDisconnectError (e) {
         console.warn('[WebBLE] handleDisconnectError:', e);
         if (!this._connected) return;
+        if (this._expectedDisconnect || this._silentConnect) {
+            this.disconnect({silent: true});
+            return;
+        }
         this.disconnect();
         if (this._resetCallback) {
             this._resetCallback();
@@ -380,7 +487,7 @@ class WebBLE {
     _handleRequestError (e) {
         console.error('[WebBLE] _handleRequestError:', e);
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
-            message: `Scratch lost connection to`,
+            message: (e && e.message) || 'Bluetooth connection failed',
             deviceId: this._deviceId
         });
     }
@@ -414,20 +521,30 @@ class WebBLE {
  * @param {object} peripheralOptions - the list of options for peripheral discovery.
  * @param {object} connectCallback - a callback for connection.
  * @param {object} resetCallback - a callback for resetting extension state.
+ * @param {object} options - backend selection options.
+ * @param {boolean} options.webOnly - do not fall back to Scratch Link.
  */
 class BLE {
-    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null) {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null, options = {}) {
         this._runtime = runtime;
         this._deviceId = deviceId;
         this._peripheralOptions = peripheralOptions;
         this._connectCallback = connectCallback;
         this._resetCallback = resetCallback;
+        this._webOnly = options.webOnly === true;
 
         this._backend = null;
 
         if (BLE._isWebBluetoothSupported()) {
             console.log('[BLE] Web Bluetooth API is supported, trying browser picker');
             this._tryWebBluetooth();
+        } else if (this._webOnly) {
+            Promise.resolve().then(() => {
+                this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+                    message: 'Web Bluetooth API is not supported in this browser',
+                    deviceId: this._deviceId
+                });
+            });
         } else {
             console.log('[BLE] Web Bluetooth API not supported, using Scratch Link');
             this._useScratchLink();
@@ -454,6 +571,14 @@ class BLE {
                 console.log('[BLE] Web Bluetooth device selected, backend ready');
             })
             .catch(e => {
+                if (this._webOnly) {
+                    this._backend = null;
+                    this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+                        message: (e && e.message) || 'No Bluetooth device selected',
+                        deviceId: this._deviceId
+                    });
+                    return;
+                }
                 console.log('[BLE] Web Bluetooth cancelled or denied:', e, ', falling back to Scratch Link');
                 // User cancelled or permission denied, fall back to Scratch Link
                 this._useScratchLink();
@@ -475,19 +600,25 @@ class BLE {
         }
     }
 
-    connectPeripheral (id) {
+    connectPeripheral (id, options = {}) {
         const backendName = this._backend ? this._backend.constructor.name : 'null';
         console.log('[BLE] connectPeripheral, id:', id, ', backend:', backendName);
         if (this._backend) {
-            this._backend.connectPeripheral(id);
-        } else {
-            console.error('[BLE] connectPeripheral called but no backend available');
+            return this._backend.connectPeripheral(id, options);
+        }
+        console.error('[BLE] connectPeripheral called but no backend available');
+        return options.silent ? Promise.reject(new Error('No BLE backend')) : Promise.resolve(false);
+    }
+
+    expectDisconnect () {
+        if (this._backend && typeof this._backend.expectDisconnect === 'function') {
+            this._backend.expectDisconnect();
         }
     }
 
-    disconnect () {
+    disconnect (options = {}) {
         if (this._backend) {
-            this._backend.disconnect();
+            this._backend.disconnect(options);
         }
     }
 

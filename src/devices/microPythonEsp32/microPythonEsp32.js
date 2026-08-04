@@ -3,7 +3,7 @@ const formatMessage = require('format-message');
 const ArgumentType = require('../../extension-support/argument-type');
 const BlockType = require('../../extension-support/block-type');
 
-const CommonPeripheral = require('../common/common-peripheral');
+const MicroPythonMultiTransportPeripheral = require('../common/micropython-multi-transport-peripheral');
 
 /**
  * The list of USB device filters.
@@ -33,7 +33,10 @@ const SERIAL_CONFIG = {
  * @readonly
  */
 const DIVECE_OPT = {
-    type: 'microPython'
+    type: 'microPython',
+    chip: 'esp32',
+    firmwarePrefix: 'esp32-ble-openblock',
+    flashAddress: '0x1000'
 };
 
 const Pins = {
@@ -118,23 +121,6 @@ const SR04_FUNC =
     '    tp.value(0)\n' +
     '    d = machine.time_pulse_us(ep, 1, 30000)\n' +
     '    return round(d / 58.0, 1) if d > 0 else 0\n';
-
-/**
- * Manage communication with a MicroPython esp32 peripheral over a OpenBlock Link client socket.
- */
-class MicroPythonEsp32 extends CommonPeripheral{
-    /**
-     * Construct a MicroPython esp32 communication object.
-     * @param {Runtime} runtime - the OpenBlock runtime
-     * @param {string} deviceId - the id of the extension
-     * @param {string} originalDeviceId - the original id of the peripheral, like xxx_microPythonEsp32
-     * @param {Array.<string>} pnpidList - USB pnp id filters, defaults to the classic ESP32 list.
-     * @param {object} deviceOpt - uploader options, defaults to the classic ESP32 options.
-     */
-    constructor (runtime, deviceId, originalDeviceId, pnpidList = PNPID_LIST, deviceOpt = DIVECE_OPT) {
-        super(runtime, deviceId, originalDeviceId, pnpidList, SERIAL_CONFIG, deviceOpt);
-    }
-}
 
 /**
  * OpenBlock blocks to interact with a MicroPython esp32 peripheral.
@@ -646,11 +632,17 @@ class OpenBlockMicroPythonEsp32Device {
          */
         this.runtime = runtime;
 
-        // Create a new MicroPython esp32 peripheral instance. The pnp id
-        // list and uploader options come from getters so chip variants
-        // (e.g. the C3) can override them.
-        this._peripheral = new MicroPythonEsp32(
-            this.runtime, this.DEVICE_ID, originalDeviceId, this.PNPID_LIST, this.DIVECE_OPT);
+        // One logical board can use Link, Web Serial, or Web Bluetooth.
+        // Chip variants override the pin list and uploader options while the
+        // transport selector remains shared.
+        this._peripheral = new MicroPythonMultiTransportPeripheral(
+            this.runtime,
+            this.DEVICE_ID,
+            originalDeviceId,
+            this.PNPID_LIST,
+            SERIAL_CONFIG,
+            this.DIVECE_OPT
+        );
     }
 
     /**

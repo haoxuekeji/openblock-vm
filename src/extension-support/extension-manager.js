@@ -8,6 +8,9 @@ const log = require('../util/log');
 const maybeFormatMessage = require('../util/maybe-format-message');
 
 const BlockType = require('./block-type');
+const {
+    normalizeDeviceDescriptors
+} = require('./device-descriptor');
 
 // Local resources server address, used as fallback when no static
 // resources snapshot is deployed next to the GUI.
@@ -49,6 +52,8 @@ const builtinExtensions = {
     speak: () => require('../extensions/scratch3_speak'),
     asr: () => require('../extensions/scratch3_asr'),
     aiChat: () => require('../extensions/scratch3_aichat'),
+    mlClassifier: () => require('../extensions/scratch3_ml_classifier'),
+    bodySensing: () => require('../extensions/scratch3_body_sensing'),
 
     wedo2: () => require('../extensions/scratch3_wedo2'),
     microbit: () => require('../extensions/scratch3_microbit'),
@@ -56,6 +61,13 @@ const builtinExtensions = {
     boost: () => require('../extensions/scratch3_boost'),
     gdxfor: () => require('../extensions/scratch3_gdx_for'),
     que: () => require('../extensions/scratch3_que/index.js')
+};
+
+const legacyDeviceTransports = {
+    microPythonEsp32Ble: {deviceId: 'microPythonEsp32', transport: 'webble'},
+    microPythonEsp32WebSerial: {deviceId: 'microPythonEsp32', transport: 'webserial'},
+    microPythonEsp32C3Ble: {deviceId: 'microPythonEsp32C3', transport: 'webble'},
+    microPythonEsp32C3WebSerial: {deviceId: 'microPythonEsp32C3', transport: 'webserial'}
 };
 
 const builtinDevices = {
@@ -143,6 +155,227 @@ const builtinDevices = {
  * @property {Function} resolve - function to call on successful worker startup
  * @property {Function} reject - function to call on failed worker startup
  */
+
+/**
+ * Score a device entry for library display preference.
+ * Higher score wins; Arduino variants beat MicroPython / base entries.
+ * @param {object} device - device index entry
+ * @returns {number} preference score
+ */
+const deviceFrameworkScore = device => {
+    const frameworks = []
+        .concat(device.frameworks || [])
+        .concat(device.typeList || [])
+        .map(item => String(item).toLowerCase());
+    const deviceId = String(device.deviceId || '').toLowerCase();
+    if (frameworks.indexOf('arduino') !== -1 || deviceId.indexOf('arduino') !== -1) {
+        return 3;
+    }
+    if (frameworks.indexOf('micropython') !== -1 || deviceId.indexOf('micropython') !== -1) {
+        return 2;
+    }
+    return 1;
+};
+
+/**
+ * Pick the library representative for an explicit parentDeviceId group.
+ * @param {Array.<object>} members - base + framework variants
+ * @param {string} parentId - shared parent device id
+ * @returns {object|null} representative entry, or null when the group should be hidden
+ */
+const pickExplicitDeviceRepresentative = (members, parentId) => {
+    if (!members || members.length === 0) {
+        return null;
+    }
+    const base = members.find(item => item.deviceId === parentId) || null;
+    const variants = members.filter(item => item.deviceId !== parentId);
+    const candidates = variants.length > 0 ? variants : members;
+    const ranked = candidates.slice().sort((left, right) =>
+        deviceFrameworkScore(right) - deviceFrameworkScore(left));
+    const representative = Object.assign({}, ranked[0]);
+
+    // Keep multi-framework UI metadata from the base entry when present.
+    if (base) {
+        if (base.typeList) {
+            representative.typeList = base.typeList;
+        }
+        if (base.frameworks) {
+            representative.frameworks = base.frameworks;
+        }
+        if (base.name && !representative.name) {
+            representative.name = base.name;
+        }
+        if (base.description && !representative.description) {
+            representative.description = base.description;
+        }
+        if (base.iconURL && (!representative.iconURL || representative.hide)) {
+            representative.iconURL = base.iconURL;
+            representative.connectionIconURL = base.connectionIconURL || representative.connectionIconURL;
+            representative.connectionSmallIconURL =
+                base.connectionSmallIconURL || representative.connectionSmallIconURL;
+        }
+    }
+
+    // Mirror legacy external-device rules for third-party entries.
+    if ((representative.deviceId.indexOf('_') === -1) && !!representative.name) {
+        return null;
+    }
+    return representative;
+};
+
+/**
+ * Legacy multi-framework collapse based on deviceId naming and list order.
+ * Kept for indexes that do not yet declare parentDeviceId / frameworks.
+ * @param {Array.<object>} devices - raw device index entries
+ * @returns {Array.<object>} filtered devices for the library
+ */
+const filterExternalDevicesLegacy = devices => {
+    const filteredDevices = [];
+    let currentBases = 'none';
+
+    devices.forEach(dev => {
+        // Filter out devices that are not inherited but have multiple programming
+        // frameworks, and only keep devices with the Arduino framework
+        const deviceId = dev.deviceId;
+        if (!deviceId.startsWith('arduino') && !deviceId.startsWith('microPython')) {
+            currentBases = deviceId;
+            filteredDevices.push(dev);
+        } else if (deviceId.indexOf(currentBases.charAt(0).toUpperCase() +
+            currentBases.slice(1)) === -1) {
+            currentBases = deviceId;
+            filteredDevices.push(dev);
+        } else if (deviceId.startsWith('arduino')) {
+            filteredDevices.pop();
+            filteredDevices.push(dev);
+        }
+    });
+
+    return filteredDevices.filter(dev => {
+        // Filter out external non-inherited devices
+        if ((dev.deviceId.indexOf('_') === -1) && (!!dev.name)) {
+            return false;
+        }
+
+        // Filter out devices that are inherited but have multiple programming
+        // frameworks, and only keep devices with the Arduino framework
+        if ((dev.deviceId.indexOf('_') !== -1) && !!dev.typeList &&
+            (dev.deviceId.indexOf('arduino') === -1)) {
+            return false;
+        }
+        return true;
+    });
+};
+
+/**
+ * Collapse multi-framework device variants into one library entry.
+ * Prefer explicit `parentDeviceId` / `frameworks`; fall back to legacy heuristics.
+ * @param {Array.<object>} devices - raw device index entries
+ * @returns {Array.<object>} filtered devices for the library
+ */
+const filterExternalDevices = devices => {
+    if (!Array.isArray(devices)) {
+        return [];
+    }
+
+    // Normalize declarative metadata before merging / filtering.
+    devices = normalizeDeviceDescriptors(devices);
+
+    const parentIds = new Set();
+    devices.forEach(dev => {
+        if (dev && dev.parentDeviceId) {
+            parentIds.add(dev.parentDeviceId);
+        }
+    });
+
+    const isExplicit = dev =>
+        !!(dev && dev.deviceId && (dev.parentDeviceId || parentIds.has(dev.deviceId)));
+
+    if (parentIds.size === 0) {
+        return filterExternalDevicesLegacy(devices);
+    }
+
+    const groups = new Map();
+    const legacyDevices = [];
+    devices.forEach(dev => {
+        if (!dev || !dev.deviceId) {
+            return;
+        }
+        if (isExplicit(dev)) {
+            const parentId = dev.parentDeviceId || dev.deviceId;
+            if (!groups.has(parentId)) {
+                groups.set(parentId, []);
+            }
+            groups.get(parentId).push(dev);
+        } else {
+            legacyDevices.push(dev);
+        }
+    });
+
+    const explicitReps = new Map();
+    groups.forEach((members, parentId) => {
+        const representative = pickExplicitDeviceRepresentative(members, parentId);
+        if (representative) {
+            explicitReps.set(parentId, representative);
+        }
+    });
+
+    const legacyFiltered = filterExternalDevicesLegacy(legacyDevices);
+
+    // Preserve original index order: emit each explicit group once at first sight,
+    // and emit legacy survivors when their (possibly replaced) id is reached.
+    const emittedGroups = new Set();
+    const emittedLegacy = new Set();
+    const result = [];
+
+    devices.forEach(dev => {
+        if (!dev || !dev.deviceId) {
+            return;
+        }
+        if (isExplicit(dev)) {
+            const parentId = dev.parentDeviceId || dev.deviceId;
+            if (emittedGroups.has(parentId)) {
+                return;
+            }
+            emittedGroups.add(parentId);
+            const representative = explicitReps.get(parentId);
+            if (representative) {
+                result.push(representative);
+            }
+            return;
+        }
+
+        // Legacy path may replace a base entry with an Arduino variant that
+        // appears later. Emit when we first encounter any member that maps to
+        // a surviving filtered id, without duplicating.
+        const legacyMatch = legacyFiltered.find(item => {
+            if (emittedLegacy.has(item.deviceId)) {
+                return false;
+            }
+            // Same entry
+            if (item.deviceId === dev.deviceId) {
+                return true;
+            }
+            // Arduino variant that replaced this base under the legacy heuristic
+            const baseSuffix = `${dev.deviceId.charAt(0).toUpperCase()}${dev.deviceId.slice(1)}`;
+            return item.deviceId.indexOf(baseSuffix) !== -1 &&
+                item.deviceId.startsWith('arduino');
+        });
+        if (legacyMatch) {
+            emittedLegacy.add(legacyMatch.deviceId);
+            result.push(legacyMatch);
+        }
+    });
+
+    // Any legacy survivors not yet emitted (e.g. order edge cases) append in
+    // filter order so nothing is silently dropped.
+    legacyFiltered.forEach(dev => {
+        if (!emittedLegacy.has(dev.deviceId)) {
+            result.push(dev);
+        }
+    });
+
+    return result;
+};
 
 class ExtensionManager {
     constructor(runtime) {
@@ -354,7 +587,7 @@ class ExtensionManager {
         return chain;
     }
 
-    /**
+/**
      * Get unbuild-in devices list from static resources or local server.
      * @returns {Promise} resolved devices list has been fetched or failure
      */
@@ -362,44 +595,7 @@ class ExtensionManager {
         return new Promise(resolve => {
             this._fetchResourceIndex('devices')
                 .then(({base, data}) => {
-                    let devices = data;
-                    // filter unsupported distribution content
-                    let filteredDevices = [];
-                    let currentBases = 'none';
-
-                    devices.forEach(dev => {
-                        // Filter out devices that are not inherited but have multiple programming
-                        // frameworks, and only keep devices with the Arduino framework
-                        const deviceId = dev.deviceId;
-                        if (!deviceId.startsWith('arduino') && !deviceId.startsWith('microPython')) {
-                            currentBases = deviceId;
-                            filteredDevices.push(dev);
-                        } else if (deviceId.indexOf(currentBases.charAt(0).toUpperCase() +
-                            currentBases.slice(1)) === -1) {
-                            currentBases = deviceId;
-                            filteredDevices.push(dev);
-                        } else if (deviceId.startsWith('arduino')) {
-                            filteredDevices.pop();
-                            filteredDevices.push(dev);
-                        }
-                    });
-
-                    filteredDevices = filteredDevices.filter(dev => {
-                        // Filter out external non-inherited devices
-                        if ((dev.deviceId.indexOf('_') === -1) && (!!dev.name)) {
-                            return false;
-                        }
-
-                        // Filter out devices that are inherited but have multiple programming
-                        // frameworks, and only keep devices with the Arduino framework
-                        if ((dev.deviceId.indexOf('_') !== -1) && !!dev.typeList &&
-                            (dev.deviceId.indexOf('arduino') === -1)) {
-                            return false;
-                        }
-                        return true;
-                    });
-
-                    devices = filteredDevices.map(dev => {
+                    const devices = filterExternalDevices(data).map(dev => {
                         dev.hide = false;
                         dev.iconURL = base + dev.iconURL;
                         dev.connectionIconURL = base + dev.connectionIconURL;
@@ -426,6 +622,17 @@ class ExtensionManager {
             this.clearDevice();
             return Promise.resolve();
         }
+
+        // Projects created before multi-transport devices stored the transport
+        // in the device id. Load them as the canonical board and restore the
+        // equivalent transport, so the next save automatically migrates them.
+        let transport = device.transport || null;
+        const legacy = legacyDeviceTransports[device.deviceId];
+        if (legacy) {
+            device = Object.assign({}, device, {deviceId: legacy.deviceId});
+            transport = legacy.transport;
+        }
+
         const {deviceId, type, pnpidList} = device;
 
         const realDeviceId = this.runtime.analysisRealDeviceId(deviceId);
@@ -444,6 +651,9 @@ class ExtensionManager {
             this.runtime.clearMonitor();
             const dev = builtinDevices[realDeviceId]();
             const deviceInstance = new dev(this.runtime, deviceId);
+            if (transport) {
+                this.runtime.setPeripheralTransport(deviceId, transport);
+            }
             const serviceName = this._registerInternalExtension(deviceInstance);
             this._loadedDevice.clear();
 
@@ -544,6 +754,7 @@ class ExtensionManager {
             registerUrls.push(deviceExtension.blocks);
             registerUrls.push(deviceExtension.translations);
             registerUrls.push(deviceExtension.generator);
+            registerUrls.push(deviceExtension.runtime);
 
             // Remove null values
             registerUrls = registerUrls.filter(url => url !== null && typeof url !== 'undefined' && url !== '');
@@ -557,23 +768,39 @@ class ExtensionManager {
                 }
                 return url;
             };
-            registerUrls = registerUrls.map(resolveResourceUrl);
+            const resourceVersion = deviceExtension.version ? encodeURIComponent(deviceExtension.version) : null;
+            const appendResourceVersion = url => {
+                if (!resourceVersion) return url;
+                const separator = url.indexOf('?') === -1 ? '?' : '&';
+                return `${url}${separator}v=${resourceVersion}`;
+            };
+            registerUrls = registerUrls.map(url => appendResourceVersion(resolveResourceUrl(url)));
 
             // clear global register before load external extension.
             global.registerToolboxs = null;
             global.registerBlocks = null;
             global.registerGenerators = null;
             global.registerBlocksMessages = null;
+            global.registerDeviceExtensionRuntime = null;
 
             // Library .py files a browser-direct uploader (Web Bluetooth /
             // Web Serial) must install on the board along with the program.
-            const libraryFiles = (deviceExtension.libraryFiles || []).map(resolveResourceUrl);
+            const libraryFiles = (deviceExtension.libraryFiles || [])
+                .map(url => appendResourceVersion(resolveResourceUrl(url)));
 
             loadjs(registerUrls, {returnPromise: true})
                 .then(() => {
                     const getToolboxXML = global.registerToolboxs;
+                    const realtimePrimitives = global.registerDeviceExtensionRuntime ?
+                        global.registerDeviceExtensionRuntime(this.runtime) : null;
                     this.runtime.addDeviceExtension(
-                        deviceExtensionId, getToolboxXML(), deviceExtension.library, libraryFiles);
+                        deviceExtensionId,
+                        getToolboxXML(),
+                        deviceExtension.library,
+                        libraryFiles,
+                        realtimePrimitives,
+                        deviceExtension.programMode
+                    );
 
                     const deviceExtensionsRegister = {
                         defineBlocks: global.registerBlocks,
@@ -918,3 +1145,5 @@ class ExtensionManager {
 }
 
 module.exports = ExtensionManager;
+module.exports.filterExternalDevices = filterExternalDevices;
+module.exports.filterExternalDevicesLegacy = filterExternalDevicesLegacy;

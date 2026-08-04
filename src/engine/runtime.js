@@ -900,6 +900,16 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for asking the user to confirm flashing the MicroPython
+     * firmware, which erases the whole board flash. The event payload
+     * carries a `respond` callback expecting a boolean.
+     * @const {string}
+     */
+    static get PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM () {
+        return 'PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM';
+    }
+
+    /**
      * Event name to indicate that the microphone is being used to stream audio.
      * @const {string}
      */
@@ -1739,17 +1749,27 @@ class Runtime extends EventEmitter {
      * @param {?Target} [target] - the active editing target (optional)
      */
     getBlocksXML (target) {
-        const _loadedDeviceExtensionsInfo = [];
+        const activeProgramMode = this.isRealtimeMode() ?
+            ProgramModeType.REALTIME : ProgramModeType.UPLOAD;
+        const loadedDeviceExtensionsInfo = [];
         this._loadedDeviceExtensions.forEach((value, id) => {
-            _loadedDeviceExtensionsInfo.push({id: id, xml: value.xml});
+            const supportedModes = value.programMode || [ProgramModeType.UPLOAD];
+            if (supportedModes.includes(activeProgramMode)) {
+                loadedDeviceExtensionsInfo.push({id, xml: value.xml});
+            }
         });
 
         if (this._device.deviceId === null) {
             return this.generateXMLfromBlockInfo(target, this._blockInfo);
-        } else if (this.isRealtimeMode()) {
-            return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo.concat(this._blockInfo));
         }
-        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo).concat(_loadedDeviceExtensionsInfo);
+        if (this.isRealtimeMode()) {
+            return this.generateXMLfromBlockInfo(
+                target,
+                this._deviceBlockInfo.concat(this._blockInfo)
+            ).concat(loadedDeviceExtensionsInfo);
+        }
+        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo)
+            .concat(loadedDeviceExtensionsInfo);
     }
 
     /**
@@ -1797,6 +1817,49 @@ class Runtime extends EventEmitter {
      */
     registerPeripheralExtension (extensionId, extension) {
         this.peripheralExtensions[extensionId] = extension;
+    }
+
+    /**
+     * Select the transport used by a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} transport - transport id such as link, webserial, or webble.
+     * @return {?string} selected transport, or null for devices without transport selection.
+     */
+    setPeripheralTransport (deviceId, transport) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.setTransport === 'function') {
+            return peripheral.setTransport(transport);
+        }
+        return null;
+    }
+
+    /**
+     * Return the active transport of a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @return {?string} active transport id.
+     */
+    getPeripheralTransport (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.getTransport === 'function') {
+            return peripheral.getTransport();
+        }
+        return null;
+    }
+
+    /**
+     * Return transports supported by a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @return {Array.<string>} supported transport ids.
+     */
+    getPeripheralTransports (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.getSupportedTransports === 'function') {
+            return peripheral.getSupportedTransports();
+        }
+        return [];
     }
 
     /**
@@ -1880,6 +1943,22 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Hard reset the extension's connected peripheral, e.g. by pulsing the
+     * serial DTR/RTS lines wired to the reset circuit of the board.
+     * @param {string} deviceId - the id of the device.
+     * @return {Promise<boolean>} - true when the transport supports it.
+     */
+    hardResetPeripheral (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.hardReset === 'function') {
+            return Promise.resolve(peripheral.hardReset());
+        }
+        return Promise.resolve(false);
+    }
+
+    /**
      * Returns whether the extension has a currently connected peripheral.
      * @param {string} deviceId - the id of the device.
      * @return {boolean} - whether the extension has a connected peripheral.
@@ -1929,6 +2008,67 @@ class Runtime extends EventEmitter {
         if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].uploadFirmware();
         }
+    }
+
+    /**
+     * List files on the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} directory - board directory.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (deviceId, directory) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.listBoardFiles !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.listBoardFiles(directory);
+    }
+
+    /**
+     * Read a file from the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @return {Promise<object>}
+     */
+    readBoardFile (deviceId, filePath) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.readBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.readBoardFile(filePath);
+    }
+
+    /**
+     * Remove a file from the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (deviceId, filePath) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.removeBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.removeBoardFile(filePath);
+    }
+
+    /**
+     * Write a file to the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file content.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (deviceId, filePath, contentBase64) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.writeBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.writeBoardFile(filePath, contentBase64);
     }
 
     /**
@@ -2595,9 +2735,56 @@ class Runtime extends EventEmitter {
      * @param {Array.<string>} library path of this device extension.
      * @param {Array.<string>} libraryFiles urls of the library .py files, used
      * by browser-direct uploaders to install them on the board.
+     * @param {object} realtimePrimitives optional opcode-to-function map used
+     * while the MicroPython device is in realtime mode. A non-enumerable
+     * `hats` property may contain opcode-to-hat-metadata entries.
+     * @param {Array.<string>} programMode modes in which the extension toolbox
+     * should be visible. Legacy extensions default to upload mode only.
      */
-    addDeviceExtension (id, xml, library, libraryFiles) {
-        this._loadedDeviceExtensions.set(id, {xml: xml, library: library, libraryFiles: libraryFiles});
+    addDeviceExtension (
+        id,
+        xml,
+        library,
+        libraryFiles,
+        realtimePrimitives = null,
+        programMode = [ProgramModeType.UPLOAD]
+    ) {
+        if (this._loadedDeviceExtensions.has(id)) {
+            this.removeDeviceExtension(id);
+        }
+        const registeredPrimitives = {};
+        const registeredHats = {};
+        if (realtimePrimitives) {
+            Object.keys(realtimePrimitives).forEach(opcode => {
+                const primitive = realtimePrimitives[opcode];
+                if (typeof primitive === 'function') {
+                    this._primitives[opcode] = primitive;
+                    registeredPrimitives[opcode] = primitive;
+                }
+            });
+            const realtimeHats = realtimePrimitives.hats;
+            if (realtimeHats && typeof realtimeHats === 'object') {
+                Object.keys(realtimeHats).forEach(opcode => {
+                    const hat = realtimeHats[opcode];
+                    if (!hat || typeof hat !== 'object') return;
+                    registeredHats[opcode] = {
+                        edgeActivated: hat.edgeActivated === true,
+                        restartExistingThreads: hat.restartExistingThreads === true
+                    };
+                    this._hats[opcode] = registeredHats[opcode];
+                });
+            }
+        }
+        const supportedProgramModes = Array.isArray(programMode) && programMode.length > 0 ?
+            programMode.slice() : [ProgramModeType.UPLOAD];
+        this._loadedDeviceExtensions.set(id, {
+            xml,
+            library,
+            libraryFiles,
+            realtimePrimitives: registeredPrimitives,
+            realtimeHats: registeredHats,
+            programMode: supportedProgramModes
+        });
     }
 
     /**
@@ -2605,6 +2792,21 @@ class Runtime extends EventEmitter {
      * @param {string} id id of this device extension.
      */
     removeDeviceExtension (id) {
+        const extension = this._loadedDeviceExtensions.get(id);
+        if (extension && extension.realtimePrimitives) {
+            Object.keys(extension.realtimePrimitives).forEach(opcode => {
+                if (this._primitives[opcode] === extension.realtimePrimitives[opcode]) {
+                    delete this._primitives[opcode];
+                }
+            });
+        }
+        if (extension && extension.realtimeHats) {
+            Object.keys(extension.realtimeHats).forEach(opcode => {
+                if (this._hats[opcode] === extension.realtimeHats[opcode]) {
+                    delete this._hats[opcode];
+                }
+            });
+        }
         this._loadedDeviceExtensions.delete(id);
     }
 
@@ -2612,7 +2814,9 @@ class Runtime extends EventEmitter {
      * Clear all device extensions of the _loadedDeviceExtensions.
      */
     clearDeviceExtension () {
-        this._loadedDeviceExtensions.clear();
+        Array.from(this._loadedDeviceExtensions.keys()).forEach(id => {
+            this.removeDeviceExtension(id);
+        });
     }
 
     /**

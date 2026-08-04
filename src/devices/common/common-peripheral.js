@@ -16,8 +16,10 @@ class CommonPeripheral{
      * @param {object} pnpidList - the pnp id of the peripheral
      * @param {object} serialConfig - the serial config of the peripheral
      * @param {object} diveceOpt - the device optione of the peripheral
+     * @param {object} options - construction options.
+     * @param {boolean} options.register - whether to register this instance in the runtime.
      */
-    constructor (runtime, deviceId, originalDeviceId, pnpidList, serialConfig, diveceOpt) {
+    constructor (runtime, deviceId, originalDeviceId, pnpidList, serialConfig, diveceOpt, options = {}) {
         /**
          * The OpenBlock runtime used to trigger the green flag button.
          * @type {Runtime}
@@ -35,7 +37,9 @@ class CommonPeripheral{
          * @private
          */
         this._serialport = null;
-        this._runtime.registerPeripheralExtension(deviceId, this);
+        if (options.register !== false) {
+            this._runtime.registerPeripheralExtension(deviceId, this);
+        }
         this._runtime.setRealtimeBaudrate(this.serialConfig.baudRate);
 
         /**
@@ -160,6 +164,16 @@ class CommonPeripheral{
     }
 
     /**
+     * Hard reset the board by pulsing the serial DTR/RTS control lines.
+     * @return {Promise<boolean>} - true when the request was sent.
+     */
+    hardReset () {
+        if (!this.isConnected()) return Promise.resolve(false);
+
+        return Promise.resolve(this._serialport.hardReset()).then(() => true);
+    }
+
+    /**
      * Send a message to the peripheral Serialport socket.
      * @param {Uint8Array} message - the message to write
      */
@@ -168,6 +182,55 @@ class CommonPeripheral{
 
         const data = Base64Util.uint8ArrayToBase64(message);
         this._serialport.write(data, 'base64');
+    }
+
+    /**
+     * List files on the board through OpenBlock Link / obmpy.
+     * @param {string} directory - board directory.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (directory = '.') {
+        if (!this.isConnected()) {
+            return Promise.reject(new Error('No peripheral is connected'));
+        }
+        return this._serialport.listBoardFiles(directory, this.diveceOpt);
+    }
+
+    /**
+     * Read a board file through OpenBlock Link / obmpy.
+     * @param {string} filePath - board path.
+     * @return {Promise<object>}
+     */
+    readBoardFile (filePath) {
+        if (!this.isConnected()) {
+            return Promise.reject(new Error('No peripheral is connected'));
+        }
+        return this._serialport.readBoardFile(filePath, this.diveceOpt);
+    }
+
+    /**
+     * Remove a board file through OpenBlock Link / obmpy.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (filePath) {
+        if (!this.isConnected()) {
+            return Promise.reject(new Error('No peripheral is connected'));
+        }
+        return this._serialport.removeBoardFile(filePath, this.diveceOpt);
+    }
+
+    /**
+     * Write a board file through OpenBlock Link / obmpy.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file content.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (filePath, contentBase64) {
+        if (!this.isConnected()) {
+            return Promise.reject(new Error('No peripheral is connected'));
+        }
+        return this._serialport.writeBoardFile(filePath, contentBase64, this.diveceOpt);
     }
 
     /**

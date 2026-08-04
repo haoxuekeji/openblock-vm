@@ -15,16 +15,38 @@ const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // notify
 
 /**
  * Max payload per BLE write. 20 bytes is safe for the minimum MTU (23),
- * the link layer keeps packets ordered and reliable.
+ * the link layer keeps packets ordered and reliable. Used until the real
+ * negotiated MTU has been read back from the board.
  * @readonly
  */
 const BLE_CHUNK_SIZE = 20;
+
+/**
+ * Upper bound for one Web Bluetooth characteristic write.
+ * @readonly
+ */
+const BLE_MAX_CHUNK_SIZE = 512;
+
+/**
+ * Python snippet printing the ATT MTU the board negotiated with us.
+ * Works on any obble.py firmware version, old ones answer 23.
+ * @readonly
+ */
+const BLE_MTU_QUERY = 'import obble\nprint(obble._uart._mtu if obble._uart else 23)';
 
 /**
  * Raw source bytes per raw-REPL file write command.
  * @readonly
  */
 const UPLOAD_BLOCK_SIZE = 128;
+
+/**
+ * Raw source bytes per file write command when the flow-controlled
+ * raw-paste mode (MicroPython >= 1.13) is available. Kept moderate so the
+ * temporary base64 string of one command stays small on the board.
+ * @readonly
+ */
+const RAW_PASTE_BLOCK_SIZE = 4096;
 
 /**
  * Timeout for a single raw REPL response.
@@ -37,6 +59,14 @@ const REPL_RESPONSE_TIMEOUT = 5000;
  * @readonly
  */
 const LIVE_PROLOGUE = 'from machine import Pin, PWM, DAC, ADC, TouchPad\nimport time';
+
+/**
+ * How long one live sensor reading stays valid. Blocks polling the same
+ * expression within this window share a single REPL round-trip instead
+ * of queueing one each.
+ * @readonly
+ */
+const LIVE_READ_CACHE_TTL = 50;
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -56,26 +86,68 @@ const pyStr = text => `'${String(text)
  */
 class MicroPythonBlePeripheral {
     /**
+     * Convert an extension library URL into a safe file name for the board.
+     * Cache-busting query strings and URL fragments must not become part of
+     * the MicroPython module name.
+     * @param {string} fileUrl - library resource URL.
+     * @return {string} - target file name on the board.
+     */
+    static libraryFileNameFromUrl (fileUrl) {
+        const cleanUrl = String(fileUrl).split('#')[0].split('?')[0];
+        const encodedName = cleanUrl.substring(cleanUrl.lastIndexOf('/') + 1);
+        let fileName = encodedName;
+        try {
+            fileName = decodeURIComponent(encodedName);
+        } catch (e) {
+            // Keep the original segment if it is not valid percent encoding.
+        }
+        if (!fileName || fileName === '.' || fileName === '..' || /[\\/]/.test(fileName)) {
+            throw new Error(`Invalid library file URL: ${fileUrl}`);
+        }
+        return fileName;
+    }
+    /**
      * Construct a MicroPython BLE communication object.
      * @param {Runtime} runtime - the OpenBlock runtime
      * @param {string} deviceId - the id of the extension
      * @param {string} originalDeviceId - the original id of the peripheral, like xxx_microPythonEsp32Ble
+     * @param {object} options - construction options.
+     * @param {boolean} options.register - whether to register this instance in the runtime.
      */
-    constructor (runtime, deviceId, originalDeviceId) {
+    constructor (runtime, deviceId, originalDeviceId, options = {}) {
         this._runtime = runtime;
         this._deviceId = deviceId;
         this._originalDeviceId = originalDeviceId;
+        this._webBluetoothOnly = options.webBluetoothOnly === true;
 
         this._ble = null;
-        this._runtime.registerPeripheralExtension(deviceId, this);
+        if (options.register !== false) {
+            this._runtime.registerPeripheralExtension(deviceId, this);
+        }
 
         /**
          * Buffer of incoming REPL text while an upload is running.
          * @type {string}
          */
         this._replBuffer = '';
+
+        /**
+         * Wakeup callbacks of pending _waitFor* calls, notified whenever
+         * new REPL data arrives or the upload is aborted.
+         * @type {Array.<Function>}
+         */
+        this._replWaiters = [];
         this._uploading = false;
         this._abort = false;
+
+        /**
+         * How many raw REPL exchanges are currently in flight. Incoming
+         * data is captured into _replBuffer only while this is > 0 (or an
+         * upload is running); everything else, e.g. asynchronous prints
+         * from timers between live commands, flows to the GUI console.
+         * @type {number}
+         */
+        this._replCaptureDepth = 0;
 
         /**
          * Whether the board REPL is currently in raw mode ready for live
@@ -83,6 +155,21 @@ class MicroPythonBlePeripheral {
          * @type {boolean}
          */
         this._liveReady = false;
+
+        /**
+         * Whether the board firmware supports the flow-controlled
+         * raw-paste mode. null = not probed yet.
+         * @type {?boolean}
+         */
+        this._rawPasteSupported = null;
+
+        /**
+         * Bytes per BLE write, grown after the negotiated MTU has been
+         * read back from the board.
+         * @type {number}
+         */
+        this._bleChunkSize = BLE_CHUNK_SIZE;
+        this._bleMtuProbed = false;
 
         /**
          * Serialize all live REPL commands, raw REPL can only run one at
@@ -105,6 +192,13 @@ class MicroPythonBlePeripheral {
          */
         this._liveObjects = new Set();
 
+        /**
+         * Short lived cache of sensor readings, expression -> entry with
+         * either an in-flight promise or {value, time}.
+         * @type {object}
+         */
+        this._liveReadCache = {};
+
         this.reset = this.reset.bind(this);
         this._onConnect = this._onConnect.bind(this);
         this._onMessage = this._onMessage.bind(this);
@@ -117,14 +211,19 @@ class MicroPythonBlePeripheral {
      */
     scan () {
         if (this._ble) {
-            this._ble.disconnect();
+            // Replacing an old scan/connection object is internal cleanup, not
+            // a user-visible disconnect. Emitting PERIPHERAL_DISCONNECTED here
+            // can make the connection modal leave the scanning phase.
+            this._ble.disconnect({silent: true});
         }
         this._ble = new BLE(this._runtime, this._originalDeviceId, {
             filters: [
                 {services: [NUS_SERVICE]},
                 {namePrefix: 'OB32', services: [NUS_SERVICE]}
             ]
-        }, this._onConnect, this.reset);
+        }, this._onConnect, this.reset, {
+            webOnly: this._webBluetoothOnly
+        });
     }
 
     /**
@@ -155,6 +254,11 @@ class MicroPythonBlePeripheral {
         this._replBuffer = '';
         this._uploading = false;
         this._abort = false;
+        this._replCaptureDepth = 0;
+        // The next connection may be a different board/firmware.
+        this._rawPasteSupported = null;
+        this._bleChunkSize = BLE_CHUNK_SIZE;
+        this._bleMtuProbed = false;
         this._resetLiveState();
         this._runtime.removeListener(this._runtime.constructor.PROGRAM_MODE_UPDATE, this._handleProgramModeUpdate);
     }
@@ -168,6 +272,7 @@ class MicroPythonBlePeripheral {
         this._liveReady = false;
         this._livePins = {};
         this._liveObjects = new Set();
+        this._liveReadCache = {};
     }
 
     /**
@@ -212,23 +317,60 @@ class MicroPythonBlePeripheral {
      * @private
      */
     async _writeRaw (buffer) {
-        for (let i = 0; i < buffer.length; i += BLE_CHUNK_SIZE) {
-            const chunk = buffer.slice(i, i + BLE_CHUNK_SIZE);
+        const chunkSize = this._bleChunkSize;
+        for (let i = 0; i < buffer.length; i += chunkSize) {
+            const chunk = buffer.slice(i, i + chunkSize);
             await this._ble.write(NUS_SERVICE, NUS_RX, chunk.toString('base64'), 'base64', false);
         }
     }
 
     /**
+     * Read back the ATT MTU the board negotiated and grow the write chunk
+     * size accordingly. Runs once per connection, from inside the raw
+     * REPL. Old firmware answers 23 and the safe 20 byte chunk is kept.
+     * @return {Promise} - resolved when the probe finished.
+     * @private
+     */
+    async _probeBleMtu () {
+        // Only meaningful for the BLE transport; the Web Serial subclass
+        // writes whole buffers and has no _ble socket.
+        if (this._bleMtuProbed || !this._ble) return;
+        this._bleMtuProbed = true;
+        try {
+            const output = await this._execRaw(BLE_MTU_QUERY);
+            const mtu = parseInt(String(output).trim(), 10);
+            if (!isNaN(mtu) && mtu > 23) {
+                this._bleChunkSize = Math.min(mtu - 3, BLE_MAX_CHUNK_SIZE);
+            }
+        } catch (err) {
+            // Unexpected firmware, keep the safe default chunk size.
+        }
+    }
+
+    /**
      * Starts reading data from peripheral after BLE has connected to it.
+     * @return {Promise} resolves when notification setup completes.
      * @private
      */
     _onConnect () {
-        this._ble.startNotifications(NUS_SERVICE, NUS_TX, this._onMessage);
+        const notificationSetup = this._ble.startNotifications(NUS_SERVICE, NUS_TX, this._onMessage);
+
+        // Initialize runtime state as soon as GATT is connected. Chrome can
+        // keep the startNotifications() promise pending even after the
+        // characteristic is already usable, so these listeners must not wait
+        // for that promise to settle.
         this._runtime.removeListener(this._runtime.constructor.PROGRAM_MODE_UPDATE, this._handleProgramModeUpdate);
         this._runtime.on(this._runtime.constructor.PROGRAM_MODE_UPDATE, this._handleProgramModeUpdate);
         if (this._runtime.isRealtimeMode()) {
             this._enqueueLive(() => this._enterLiveMode());
         }
+
+        return notificationSetup.then(() => {
+            if (!this.isConnected()) {
+                throw new Error('Bluetooth notifications could not be started');
+            }
+            return true;
+        });
     }
 
     /**
@@ -237,12 +379,40 @@ class MicroPythonBlePeripheral {
      * @private
      */
     _onMessage (base64) {
-        const data = Buffer.from(Base64Util.base64ToUint8Array(base64));
-        if (this._uploading || this._liveReady) {
+        this._routeIncoming(Buffer.from(Base64Util.base64ToUint8Array(base64)));
+    }
+
+    /**
+     * Route incoming peripheral data either into the raw REPL capture
+     * buffer (while uploading or while a raw REPL exchange is in flight)
+     * or to the GUI console. Asynchronous output produced by the board
+     * between live commands is therefore visible to the user instead of
+     * being discarded.
+     * @param {Buffer} data - the incoming data.
+     * @private
+     */
+    _routeIncoming (data) {
+        if (this._uploading || this._replCaptureDepth > 0) {
             this._replBuffer += data.toString('latin1');
+            this._notifyReplWaiters();
             return;
         }
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA, data);
+    }
+
+    /**
+     * Wake up all pending _waitFor* calls so they can re-check the REPL
+     * buffer (or notice an abort).
+     * @private
+     */
+    _notifyReplWaiters () {
+        if (this._replWaiters.length === 0) return;
+        const waiters = this._replWaiters;
+        // A woken waiter may synchronously register itself again.
+        this._replWaiters = [];
+        for (const wake of waiters) {
+            wake();
+        }
     }
 
     /**
@@ -269,27 +439,55 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Wait, event driven (no polling), until data satisfying tryTake has
+     * arrived in the REPL buffer. tryTake must consume and return the
+     * data, or return null when the buffer does not satisfy it yet.
+     * @param {Function} tryTake - () => (string|null).
+     * @param {number} timeout - max time to wait in ms.
+     * @param {string} what - description used in the timeout error.
+     * @return {Promise<string>} - whatever tryTake returned.
+     * @private
+     */
+    _waitForBuffer (tryTake, timeout, what) {
+        return new Promise((resolve, reject) => {
+            let timer = null;
+            const attempt = () => {
+                if (this._abort) {
+                    clearTimeout(timer);
+                    reject(new Error('Aborted'));
+                    return;
+                }
+                const taken = tryTake();
+                if (taken !== null) {
+                    clearTimeout(timer);
+                    resolve(taken);
+                    return;
+                }
+                this._replWaiters.push(attempt);
+            };
+            timer = setTimeout(() => {
+                this._replWaiters = this._replWaiters.filter(wake => wake !== attempt);
+                reject(new Error(`Timeout waiting for ${what} from the board`));
+            }, timeout);
+            attempt();
+        });
+    }
+
+    /**
      * Wait until the REPL buffer contains the wanted text.
      * @param {string} want - the text to wait for.
      * @param {number} timeout - max time to wait in ms.
      * @return {Promise} - resolved when matched, rejected on timeout/abort.
      * @private
      */
-    async _waitFor (want, timeout = REPL_RESPONSE_TIMEOUT) {
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
-            if (this._abort) {
-                throw new Error('Aborted');
-            }
+    _waitFor (want, timeout = REPL_RESPONSE_TIMEOUT) {
+        return this._waitForBuffer(() => {
             const index = this._replBuffer.indexOf(want);
-            if (index !== -1) {
-                const result = this._replBuffer.slice(0, index);
-                this._replBuffer = this._replBuffer.slice(index + want.length);
-                return result;
-            }
-            await wait(10);
-        }
-        throw new Error(`Timeout waiting for "${want}" from the board`);
+            if (index === -1) return null;
+            const result = this._replBuffer.slice(0, index);
+            this._replBuffer = this._replBuffer.slice(index + want.length);
+            return result;
+        }, timeout, `"${want}"`);
     }
 
     /**
@@ -300,18 +498,136 @@ class MicroPythonBlePeripheral {
      * @private
      */
     async _execRaw (command, timeout = REPL_RESPONSE_TIMEOUT) {
-        this._replBuffer = '';
-        await this._writeRaw(Buffer.from(command, 'latin1'));
-        await this._writeRaw(Buffer.from('\x04'));
-        // Raw REPL replies "OK<stdout>\x04<stderr>\x04>".
-        await this._waitFor('OK');
-        const output = await this._waitFor('\x04', timeout);
-        const error = await this._waitFor('\x04');
-        await this._waitFor('>');
-        if (error.length > 0) {
-            throw new Error(`Board error: ${error}`);
+        this._replCaptureDepth++;
+        try {
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from(command, 'latin1'));
+            await this._writeRaw(Buffer.from('\x04'));
+            // Raw REPL replies "OK<stdout>\x04<stderr>\x04>".
+            await this._waitFor('OK');
+            const output = await this._waitFor('\x04', timeout);
+            const error = await this._waitFor('\x04');
+            await this._waitFor('>');
+            if (error.length > 0) {
+                throw new Error(`Board error: ${error}`);
+            }
+            return output;
+        } finally {
+            this._replCaptureDepth--;
         }
-        return output;
+    }
+
+    /**
+     * Wait until the REPL buffer contains at least the wanted number of
+     * characters, then take and return them.
+     * @param {number} count - how many characters to take.
+     * @param {number} timeout - max time to wait in ms.
+     * @return {Promise<string>} - the taken characters.
+     * @private
+     */
+    _waitForCount (count, timeout = REPL_RESPONSE_TIMEOUT) {
+        return this._waitForBuffer(() => {
+            if (this._replBuffer.length < count) return null;
+            const result = this._replBuffer.slice(0, count);
+            this._replBuffer = this._replBuffer.slice(count);
+            return result;
+        }, timeout, `${count} bytes`);
+    }
+
+    /**
+     * Execute one command through the flow-controlled raw-paste mode
+     * (MicroPython >= 1.13). The command is streamed to the board without
+     * buffering it whole in board RAM, which allows much larger commands
+     * than the plain raw REPL. Falls back to _execRaw transparently when
+     * the firmware does not support raw-paste; the answer is cached.
+     * @param {string} command - python source to execute.
+     * @param {number} timeout - max time to wait for the output in ms.
+     * @return {Promise} - resolved with the command stdout.
+     * @private
+     */
+    async _execRawPaste (command, timeout = REPL_RESPONSE_TIMEOUT) {
+        if (this._rawPasteSupported === false) {
+            return this._execRaw(command, timeout);
+        }
+        this._replCaptureDepth++;
+        try {
+            this._replBuffer = '';
+            // Ask to enter raw-paste mode: CTRL-E "A" CTRL-A.
+            await this._writeRaw(Buffer.from('\x05A\x01', 'latin1'));
+            const answer = await this._waitForCount(2);
+            if (answer === 'R\x01') {
+                this._rawPasteSupported = true;
+                await this._rawPasteWrite(Buffer.from(command, 'latin1'), timeout);
+                // Unlike the plain raw REPL there is no leading "OK", the
+                // reply is directly "<stdout>\x04<stderr>\x04>".
+                const output = await this._waitFor('\x04', timeout);
+                const error = await this._waitFor('\x04');
+                await this._waitFor('>');
+                if (error.length > 0) {
+                    throw new Error(`Board error: ${error}`);
+                }
+                return output;
+            }
+            this._rawPasteSupported = false;
+            if (answer !== 'R\x00') {
+                // Old firmware does not understand the request at all: the
+                // \x01 makes it re-enter the raw REPL and print the banner
+                // again ("ra" of it was already consumed above).
+                await this._waitFor('w REPL; CTRL-B to exit');
+                await this._waitFor('>');
+            }
+            // 'R\x00' means understood but unsupported, the board is back
+            // at the raw REPL waiting for a plain command in both cases.
+            this._replBuffer = '';
+            return await this._execRaw(command, timeout);
+        } finally {
+            this._replCaptureDepth--;
+        }
+    }
+
+    /**
+     * Stream command bytes to the board honoring the raw-paste window
+     * based flow control, then wait for the end-of-data acknowledgement.
+     * @param {Buffer} commandBytes - python source to stream.
+     * @param {number} timeout - max time to wait for flow control in ms.
+     * @return {Promise} - resolved when the board acknowledged the data.
+     * @private
+     */
+    async _rawPasteWrite (commandBytes, timeout = REPL_RESPONSE_TIMEOUT) {
+        // The first two bytes are the flow control window size (LE).
+        const header = await this._waitForCount(2, timeout);
+        const windowSize = header.charCodeAt(0) | (header.charCodeAt(1) << 8);
+        let windowRemain = windowSize;
+        let i = 0;
+        while (i < commandBytes.length) {
+            // Consume pending flow control bytes, or block until the board
+            // opens a new window when the current one is used up.
+            while (windowRemain === 0 || this._replBuffer.length > 0) {
+                const flow = await this._waitForCount(1, timeout);
+                if (flow === '\x01') {
+                    windowRemain += windowSize;
+                } else if (flow === '\x04') {
+                    // The board ended the reception early (e.g. out of
+                    // memory). Acknowledge and let the caller read the
+                    // error from the regular stdout/stderr reply.
+                    await this._writeRaw(Buffer.from('\x04'));
+                    return;
+                } else {
+                    throw new Error('Unexpected flow control byte during raw-paste: ' +
+                        `0x${flow.charCodeAt(0).toString(16)}`);
+                }
+            }
+            if (this._abort) {
+                throw new Error('Aborted');
+            }
+            const take = Math.min(windowRemain, commandBytes.length - i);
+            await this._writeRaw(commandBytes.slice(i, i + take));
+            windowRemain -= take;
+            i += take;
+        }
+        // End of data, wait for the board acknowledgement.
+        await this._writeRaw(Buffer.from('\x04'));
+        await this._waitFor('\x04', timeout);
     }
 
     /**
@@ -340,9 +656,11 @@ class MicroPythonBlePeripheral {
      */
     async _enterLiveMode () {
         if (this._liveReady || this._uploading || !this.isConnected()) return;
-        // From here on incoming data must go to the REPL buffer. The flag
-        // also blocks a second concurrent entry.
+        // The flag blocks a second concurrent entry.
         this._liveReady = true;
+        // Capture the whole handshake, its control sequences must not
+        // reach the GUI console.
+        this._replCaptureDepth++;
         try {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x03\x03'));
@@ -350,10 +668,13 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
+            await this._probeBleMtu();
             await this._execRaw(LIVE_PROLOGUE);
         } catch (err) {
             this._liveReady = false;
             throw err;
+        } finally {
+            this._replCaptureDepth--;
         }
     }
 
@@ -381,10 +702,18 @@ class MicroPythonBlePeripheral {
      * Execute python statements on the board in live mode.
      * @param {string} command - python source to execute.
      * @param {number} timeout - max time to wait for the output in ms.
+     * @param {object} options - execution options.
+     * @param {boolean} options.isReadOnly - true when the command does not
+     *   change any board state, keeping cached sensor readings valid.
      * @return {Promise<string>} - stdout of the command, null when not ready.
      */
-    execLive (command, timeout = REPL_RESPONSE_TIMEOUT) {
+    execLive (command, timeout = REPL_RESPONSE_TIMEOUT, options = {}) {
         if (!this.isReady()) return Promise.resolve(null);
+        if (options.isReadOnly !== true) {
+            // The command may move pins or reconfigure peripherals, any
+            // cached sensor reading could be stale afterwards.
+            this._liveReadCache = {};
+        }
         return this._enqueueLive(() => {
             if (!this.isReady()) return null;
             return this._execRaw(command, timeout);
@@ -514,13 +843,32 @@ class MicroPythonBlePeripheral {
 
     /**
      * Ask the board to print an expression and return the raw text.
+     * Readings are cached for a short moment and concurrent reads of the
+     * same expression share one REPL round-trip, so a forever loop over
+     * several sensor blocks does not queue one exchange per block.
      * @param {string} expression - python expression to print.
      * @return {Promise<string>} - trimmed output, empty string as fallback.
      */
-    async readLiveString (expression) {
-        const output = await this.execLive(`print(${expression})`);
-        if (output === null) return '';
-        return String(output).trim();
+    readLiveString (expression) {
+        const cached = this._liveReadCache[expression];
+        if (cached) {
+            if (cached.promise) return cached.promise;
+            if (Date.now() - cached.time < LIVE_READ_CACHE_TTL) {
+                return Promise.resolve(cached.value);
+            }
+        }
+        const promise = this.execLive(`print(${expression})`, REPL_RESPONSE_TIMEOUT, {isReadOnly: true})
+            .then(output => {
+                const value = output === null ? '' : String(output).trim();
+                // Only publish if the cache was not invalidated meanwhile.
+                if (this._liveReadCache[expression] &&
+                    this._liveReadCache[expression].promise === promise) {
+                    this._liveReadCache[expression] = {value, time: Date.now()};
+                }
+                return value;
+            });
+        this._liveReadCache[expression] = {promise};
+        return promise;
     }
 
     /**
@@ -600,6 +948,32 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * BLE has no DTR/RTS lines, ask MicroPython itself for a machine
+     * reset instead, then reconnect like after an upload reboot.
+     * @return {Promise<boolean>} - true when the reset was requested.
+     */
+    async hardReset () {
+        if (!this.isConnected()) return false;
+        this._resetLiveState();
+        if (this._ble && typeof this._ble.expectDisconnect === 'function') {
+            this._ble.expectDisconnect();
+        }
+        try {
+            // Interrupt anything running, leave a possible raw REPL, then
+            // request the reset. The GATT link may drop mid-write.
+            await this._writeRaw(Buffer.from('\r\x03\x03\x02'));
+            await this._writeRaw(Buffer.from('import machine\r\nmachine.reset()\r\n'));
+        } catch (e) {
+            // The board rebooted before the write fully completed.
+        }
+        await this._handlePostUploadReboot();
+        if (this._runtime.isRealtimeMode()) {
+            this._enqueueLive(() => this._enterLiveMode());
+        }
+        return true;
+    }
+
+    /**
      * Called by the runtime when user wants to upload code to the peripheral.
      * Writes boot.py (BLE bootstrap keeper) and main.py through the raw REPL,
      * then soft-reboots the board.
@@ -631,15 +1005,23 @@ class MicroPythonBlePeripheral {
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
 
-            await this._execRaw('import ubinascii');
+            await this._probeBleMtu();
+
+            // Also probes for raw-paste support, which speeds up all the
+            // following file writes considerably.
+            await this._execRawPaste('import ubinascii');
+            if (this._rawPasteSupported) {
+                this._sendstd('Fast upload (raw-paste mode) enabled.\n');
+            }
 
             // Install the library modules of the loaded device extensions
             // (fetched from the external resources) before the program.
             const libraryFiles = this._runtime.getCurrentDeviceExtensionLibraryFiles ?
                 this._runtime.getCurrentDeviceExtensionLibraryFiles() : [];
             for (const fileUrl of libraryFiles) {
-                const fileName = fileUrl.split('/').pop();
+                let fileName = fileUrl;
                 try {
+                    fileName = MicroPythonBlePeripheral.libraryFileNameFromUrl(fileUrl);
                     const response = await fetch(fileUrl);
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
@@ -657,6 +1039,12 @@ class MicroPythonBlePeripheral {
             // Exit raw REPL then soft reboot so boot.py + main.py run.
             await this._writeRaw(Buffer.from('\x02'));
             await wait(100);
+            // Ctrl-D triggers a soft reboot and therefore a short BLE GATT
+            // disconnect. Mark it expected before sending the byte to avoid
+            // racing the browser's gattserverdisconnected event.
+            if (this._ble && typeof this._ble.expectDisconnect === 'function') {
+                this._ble.expectDisconnect();
+            }
             await this._writeRaw(Buffer.from('\x04'));
 
             this._uploading = false;
@@ -689,18 +1077,22 @@ class MicroPythonBlePeripheral {
      */
     async _writeFileRaw (fileName, data) {
         this._sendstd(`Writing ${fileName}...\n`);
-        await this._execRaw(`f = open('${fileName}', 'wb')`);
-        const total = Math.ceil(data.length / UPLOAD_BLOCK_SIZE) || 1;
-        for (let i = 0; i < data.length; i += UPLOAD_BLOCK_SIZE) {
+        await this._execRawPaste(`f = open('${fileName}', 'wb')`);
+        // Raw-paste streams the command with flow control instead of
+        // buffering it whole on the board, so much larger blocks per
+        // round-trip are possible.
+        const blockSize = this._rawPasteSupported ? RAW_PASTE_BLOCK_SIZE : UPLOAD_BLOCK_SIZE;
+        const total = Math.ceil(data.length / blockSize) || 1;
+        for (let i = 0; i < data.length; i += blockSize) {
             if (this._abort) {
                 throw new Error('Aborted');
             }
-            const block = data.slice(i, i + UPLOAD_BLOCK_SIZE).toString('base64');
-            await this._execRaw(`f.write(ubinascii.a2b_base64('${block}'))`);
-            const blockNumber = Math.floor(i / UPLOAD_BLOCK_SIZE) + 1;
+            const block = data.slice(i, i + blockSize).toString('base64');
+            await this._execRawPaste(`f.write(ubinascii.a2b_base64('${block}'))`);
+            const blockNumber = Math.floor(i / blockSize) + 1;
             this._sendstd(`Writing ${fileName} ${Math.round(blockNumber / total * 100)}%\n`);
         }
-        await this._execRaw('f.close()');
+        await this._execRawPaste('f.close()');
     }
 
     /**
@@ -712,7 +1104,12 @@ class MicroPythonBlePeripheral {
      * @private
      */
     async _handlePostUploadReboot () {
-        this._ble.disconnect();
+        // The board may already have dropped GATT by the time this runs. If
+        // it has not, close the old connection silently; the UI should remain
+        // in its connected state while automatic reconnect is in progress.
+        if (this.isConnected()) {
+            this._ble.disconnect({silent: true});
+        }
         this._sendstd('Waiting for the board to reboot...\n');
         await this._reconnect();
     }
@@ -724,17 +1121,37 @@ class MicroPythonBlePeripheral {
      * @private
      */
     async _reconnect () {
-        // Give the board time to reboot and restart advertising.
-        await wait(3000);
-        for (let retry = 0; retry < 3; retry++) {
-            if (this._abort) return;
-            this._ble.connectPeripheral(this._peripheralId);
-            for (let i = 0; i < 20; i++) {
-                await wait(250);
-                if (this.isConnected()) return;
+        // ESP32 BLE advertising can take several seconds to return after a
+        // soft reboot. Retry the actual GATT promise and wait for notification
+        // subscription (_onConnect) before considering the channel usable.
+        await wait(2500);
+        const maxRetries = 8;
+        let lastError = null;
+        for (let retry = 0; retry < maxRetries; retry++) {
+            if (this._abort) return false;
+            try {
+                const connected = await this._ble.connectPeripheral(this._peripheralId, {silent: true});
+                if (connected && this.isConnected()) {
+                    this._sendstd('Bluetooth reconnected.\n');
+                    return true;
+                }
+            } catch (error) {
+                lastError = error;
             }
+            await wait(1000 + (retry * 250));
         }
-        this._sendstd('Could not reconnect automatically, please reconnect the device manually.\n');
+
+        // Reconnect has definitively failed. Now publish the disconnected
+        // state so the menu bar and an open connection modal agree.
+        this._ble.disconnect();
+        const detail = lastError && lastError.message ? ` (${lastError.message})` : '';
+        const message = `Could not reconnect automatically${detail}. Please reconnect the device manually.`;
+        this._sendstd(`${message}\n`);
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+            message,
+            deviceId: this._deviceId
+        });
+        return false;
     }
 
     /**
@@ -742,6 +1159,8 @@ class MicroPythonBlePeripheral {
      */
     abortUpload () {
         this._abort = true;
+        // Wake pending REPL waits so they fail fast instead of timing out.
+        this._notifyReplWaiters();
     }
 
     /**
@@ -753,6 +1172,214 @@ class MicroPythonBlePeripheral {
             message: 'Flashing firmware is not supported over BLE, please use the USB serial device instead'
         });
     }
+
+    /**
+     * Reject path traversal / injection before embedding a path in Python.
+     * @param {string} filePath - board-relative path.
+     * @return {string} sanitized path.
+     * @private
+     */
+    _sanitizeBoardPath (filePath) {
+        const value = String(filePath || '.').replace(/\\/g, '/');
+        if (!value || value.indexOf('\0') !== -1) {
+            throw new Error('Invalid board path');
+        }
+        if (value.split('/').indexOf('..') !== -1) {
+            throw new Error('Invalid board path');
+        }
+        if (!/^[A-Za-z0-9._/\-]+$/.test(value)) {
+            throw new Error('Invalid board path');
+        }
+        return value;
+    }
+
+    /**
+     * Quote a path as a Python single-quoted string literal.
+     * @param {string} filePath - sanitized path.
+     * @return {string} python literal.
+     * @private
+     */
+    _pyQuote (filePath) {
+        return `'${String(filePath).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    }
+
+    /**
+     * Run a short raw-REPL command for board filesystem access, restoring
+     * live mode afterwards when the runtime is in realtime mode.
+     * @param {string} command - python source.
+     * @param {number} timeout - response timeout.
+     * @return {Promise<string>} command stdout.
+     * @private
+     */
+    async _runBoardFsCommand (command, timeout = REPL_RESPONSE_TIMEOUT) {
+        if (!this.isConnected()) {
+            throw new Error('No peripheral is connected');
+        }
+        await this._liveQueue;
+        const wasLive = this._liveReady;
+        this._liveReady = false;
+        try {
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from('\r\x03\x03'));
+            await wait(200);
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from('\r\x01'));
+            await this._waitFor('raw REPL; CTRL-B to exit');
+            const output = await this._execRaw(command, timeout);
+            await this._writeRaw(Buffer.from('\x02'));
+            return output;
+        } finally {
+            if (wasLive && this._runtime.isRealtimeMode && this._runtime.isRealtimeMode()) {
+                this._enqueueLive(() => this._enterLiveMode());
+            }
+        }
+    }
+
+    /**
+     * List files on the MicroPython board filesystem.
+     * @param {string} directory - board directory (default '.').
+     * @return {Promise<Array.<{name:string, path:string, isDir:boolean, size:number}>>}
+     */
+    async listBoardFiles (directory = '.') {
+        const dir = this._sanitizeBoardPath(directory || '.');
+        const quoted = this._pyQuote(dir);
+        const command =
+            'import os\n' +
+            `_p=${quoted}\n` +
+            'try:\n' +
+            ' _names=os.listdir(_p)\n' +
+            'except OSError:\n' +
+            ' _names=os.listdir()\n' +
+            " _p='.'\n" +
+            'for _n in _names:\n' +
+            " _full=(_p.rstrip('/')+'/'+_n) if _p not in ('.',) else _n\n" +
+            ' try:\n' +
+            '  _st=os.stat(_full)\n' +
+            '  _isdir=(_st[0]&0x4000)!=0\n' +
+            "  print(('D' if _isdir else 'F')+'\\t'+_n+'\\t'+str(0 if _isdir else _st[6]))\n" +
+            ' except OSError:\n' +
+            "  print('F\\t'+_n+'\\t0')\n";
+        const output = await this._runBoardFsCommand(command);
+        return MicroPythonBlePeripheral.parseBoardLsOutput(output, dir);
+    }
+
+    /**
+     * Read a file from the board as base64.
+     * @param {string} filePath - board file path.
+     * @return {Promise<{name:string, path:string, size:number, contentBase64:string}>}
+     */
+    async readBoardFile (filePath) {
+        const path = this._sanitizeBoardPath(filePath);
+        const quoted = this._pyQuote(path);
+        const command =
+            'import os,ubinascii\n' +
+            `_p=${quoted}\n` +
+            '_st=os.stat(_p)\n' +
+            'if (_st[0]&0x4000)!=0:\n' +
+            " raise OSError('is a directory')\n" +
+            'if _st[6] > 200000:\n' +
+            " raise OSError('file too large')\n" +
+            "with open(_p,'rb') as _f:\n" +
+            ' _data=_f.read()\n' +
+            "print(str(_st[6])+'\\t'+ubinascii.b2a_base64(_data).decode().strip())\n";
+        const output = await this._runBoardFsCommand(command, 60000);
+        const line = String(output || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+        const tab = line.indexOf('\t');
+        if (tab === -1) {
+            throw new Error('Unexpected board file response');
+        }
+        const size = Number(line.slice(0, tab));
+        const contentBase64 = line.slice(tab + 1).replace(/\s+/g, '');
+        const name = path.split('/').pop();
+        return {name, path, size, contentBase64};
+    }
+
+    /**
+     * Delete a file (or empty directory) on the board.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    async removeBoardFile (filePath) {
+        const path = this._sanitizeBoardPath(filePath);
+        const quoted = this._pyQuote(path);
+        const command =
+            'import os\n' +
+            `_p=${quoted}\n` +
+            '_st=os.stat(_p)\n' +
+            'if (_st[0]&0x4000)!=0:\n' +
+            ' os.rmdir(_p)\n' +
+            'else:\n' +
+            ' os.remove(_p)\n' +
+            "print('OK')\n";
+        await this._runBoardFsCommand(command);
+        return true;
+    }
+
+    /**
+     * Write a file to the board from base64 content.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file bytes as base64.
+     * @return {Promise<boolean>}
+     */
+    async writeBoardFile (filePath, contentBase64) {
+        const path = this._sanitizeBoardPath(filePath);
+        if (!this.isConnected()) {
+            throw new Error('No peripheral is connected');
+        }
+        const data = Buffer.from(String(contentBase64 || ''), 'base64');
+        await this._liveQueue;
+        const wasLive = this._liveReady;
+        this._liveReady = false;
+        try {
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from('\r\x03\x03'));
+            await wait(200);
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from('\r\x01'));
+            await this._waitFor('raw REPL; CTRL-B to exit');
+            await this._execRawPaste('import ubinascii');
+            await this._writeFileRaw(path, data);
+            await this._writeRaw(Buffer.from('\x02'));
+            return true;
+        } finally {
+            if (wasLive && this._runtime.isRealtimeMode && this._runtime.isRealtimeMode()) {
+                this._enqueueLive(() => this._enterLiveMode());
+            }
+        }
+    }
+
+    /**
+     * Parse `listBoardFiles` stdout into structured entries.
+     * @param {string} output - raw REPL stdout.
+     * @param {string} directory - listed directory.
+     * @return {Array.<{name:string, path:string, isDir:boolean, size:number}>}
+     */
+    static parseBoardLsOutput (output, directory = '.') {
+        const dir = directory && directory !== '.' ? String(directory).replace(/\/$/, '') : '';
+        const entries = [];
+        String(output || '').split(/\r?\n/).forEach(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            const parts = trimmed.split('\t');
+            if (parts.length < 2) return;
+            const kind = parts[0];
+            const name = parts[1];
+            const size = Number(parts[2] || 0);
+            if ((kind !== 'F' && kind !== 'D') || !name) return;
+            entries.push({
+                name,
+                path: dir ? `${dir}/${name}` : name,
+                isDir: kind === 'D',
+                size: Number.isFinite(size) ? size : 0
+            });
+        });
+        entries.sort((a, b) => {
+            if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+        return entries;
+    }
 }
 
 module.exports = MicroPythonBlePeripheral;
+module.exports.parseBoardLsOutput = MicroPythonBlePeripheral.parseBoardLsOutput;
