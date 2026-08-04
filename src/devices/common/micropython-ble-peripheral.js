@@ -1175,19 +1175,27 @@ class MicroPythonBlePeripheral {
 
     /**
      * Reject path traversal / injection before embedding a path in Python.
+     * Kept permissive otherwise: files already on the board may carry odd
+     * names (e.g. a legacy cache-busting "lib.py?v=1.0.0") and must stay
+     * manageable. Quotes and backslashes are escaped by _pyQuote.
      * @param {string} filePath - board-relative path.
      * @return {string} sanitized path.
      * @private
      */
     _sanitizeBoardPath (filePath) {
         const value = String(filePath || '.').replace(/\\/g, '/');
-        if (!value || value.indexOf('\0') !== -1) {
+        if (!value) {
             throw new Error('Invalid board path');
+        }
+        // Control characters could break out of the quoted python literal
+        // or disturb the raw REPL protocol itself.
+        for (let i = 0; i < value.length; i++) {
+            const code = value.charCodeAt(i);
+            if (code < 0x20 || code === 0x7F) {
+                throw new Error('Invalid board path');
+            }
         }
         if (value.split('/').indexOf('..') !== -1) {
-            throw new Error('Invalid board path');
-        }
-        if (!/^[A-Za-z0-9._/\-]+$/.test(value)) {
             throw new Error('Invalid board path');
         }
         return value;
@@ -1218,6 +1226,9 @@ class MicroPythonBlePeripheral {
         await this._liveQueue;
         const wasLive = this._liveReady;
         this._liveReady = false;
+        // Capture the whole exchange, the raw REPL handshake banners must
+        // not reach the GUI console and _waitFor only sees captured data.
+        this._replCaptureDepth++;
         try {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x03\x03'));
@@ -1227,8 +1238,11 @@ class MicroPythonBlePeripheral {
             await this._waitFor('raw REPL; CTRL-B to exit');
             const output = await this._execRaw(command, timeout);
             await this._writeRaw(Buffer.from('\x02'));
+            // Swallow the friendly REPL banner printed after CTRL-B.
+            await this._waitFor('>>>', 1000).catch(() => {});
             return output;
         } finally {
+            this._replCaptureDepth--;
             if (wasLive && this._runtime.isRealtimeMode && this._runtime.isRealtimeMode()) {
                 this._enqueueLive(() => this._enterLiveMode());
             }
@@ -1330,6 +1344,8 @@ class MicroPythonBlePeripheral {
         await this._liveQueue;
         const wasLive = this._liveReady;
         this._liveReady = false;
+        // Same capture rules as _runBoardFsCommand.
+        this._replCaptureDepth++;
         try {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x03\x03'));
@@ -1340,8 +1356,11 @@ class MicroPythonBlePeripheral {
             await this._execRawPaste('import ubinascii');
             await this._writeFileRaw(path, data);
             await this._writeRaw(Buffer.from('\x02'));
+            // Swallow the friendly REPL banner printed after CTRL-B.
+            await this._waitFor('>>>', 1000).catch(() => {});
             return true;
         } finally {
+            this._replCaptureDepth--;
             if (wasLive && this._runtime.isRealtimeMode && this._runtime.isRealtimeMode()) {
                 this._enqueueLive(() => this._enterLiveMode());
             }
