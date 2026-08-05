@@ -109,6 +109,7 @@ const extensionInfoWithCustomFieldTypes = {
         'single-port-selector': {
             output: 'string',
             outputShape: 2,
+            args0: [{name: 'field_test_custom_fieldType_single-port-selector'}],
             implementation: {
                 fromJson: () => null
             }
@@ -116,6 +117,7 @@ const extensionInfoWithCustomFieldTypes = {
         'custom-direction': {
             output: 'string',
             outputShape: 3,
+            args0: [{name: 'field_test_custom_fieldType_custom-direction'}],
             implementation: {
                 fromJson: () => null
             }
@@ -274,7 +276,8 @@ const testLoop = function (t, loop) {
 test('registerExtensionPrimitives', t => {
     const runtime = new Runtime();
 
-    runtime.on(Runtime.EXTENSION_ADDED, categoryInfo => {
+    runtime.on(Runtime.SCRATCH_EXTENSION_ADDED, ({categoryInfoArray}) => {
+        const categoryInfo = categoryInfoArray[0];
         const blocksInfo = categoryInfo.blocks;
         t.equal(blocksInfo.length, testExtensionInfo.blocks.length);
 
@@ -297,13 +300,14 @@ test('registerExtensionPrimitives', t => {
         t.end();
     });
 
-    runtime._registerExtensionPrimitives(testExtensionInfo);
+    runtime._registerExtensionPrimitives([testExtensionInfo], {extensionId: 'test', deviceId: null});
 });
 
 test('custom field types should be added to block and EXTENSION_FIELD_ADDED callback triggered', t => {
     const runtime = new Runtime();
 
-    runtime.on(Runtime.EXTENSION_ADDED, categoryInfo => {
+    runtime.on(Runtime.SCRATCH_EXTENSION_ADDED, ({categoryInfoArray}) => {
+        const categoryInfo = categoryInfoArray[0];
         const blockInfo = categoryInfo.blocks[0];
 
         // We expect that for each argument there's a corresponding <field>-tag in the block XML
@@ -315,11 +319,14 @@ test('custom field types should be added to block and EXTENSION_FIELD_ADDED call
     });
 
     let fieldAddedCallbacks = 0;
-    runtime.on(Runtime.EXTENSION_FIELD_ADDED, () => {
+    runtime.on(Runtime.SCRATCH_EXTENSION_FIELD_ADDED, () => {
         fieldAddedCallbacks++;
     });
 
-    runtime._registerExtensionPrimitives(extensionInfoWithCustomFieldTypes);
+    runtime._registerExtensionPrimitives(
+        [extensionInfoWithCustomFieldTypes],
+        {extensionId: 'testCustomFieldType', deviceId: null}
+    );
 
     // Extension includes two custom field types
     t.equal(fieldAddedCallbacks, 2);

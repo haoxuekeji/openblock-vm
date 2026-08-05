@@ -480,6 +480,15 @@ class ExtensionManager {
     }
 
     /**
+     * Check whether an extension ID matches a built-in scratch extension.
+     * @param {string} extensionId - the ID to look up
+     * @returns {boolean} true if the ID matches a built-in extension
+     */
+    isBuiltinExtension (extensionId) {
+        return builtinExtensions.hasOwnProperty(extensionId);
+    }
+
+    /**
      * Synchronously load an internal extension (core or non-core) by ID. This call will
      * fail if the provided id is not does not match an internal extension.
      * @param {string} extensionId - the ID of an internal extension

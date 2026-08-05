@@ -670,8 +670,7 @@ class VirtualMachine extends EventEmitter {
             return Promise.reject('Unable to verify Scratch Project version.');
         };
         return deserializePromise()
-            // Step1: Install device first.
-            .then(({targets}) => {
+            .then(({targets, extensions}) => {
                 if (typeof performance !== 'undefined') {
                     performance.mark('scratch-vm-deserialize-end');
                     performance.measure('scratch-vm-deserialize',
@@ -691,14 +690,37 @@ class VirtualMachine extends EventEmitter {
                     device = projectJSON.device;
                 }
 
-                return this.installDevice(targets, device, projectJSON.programMode, projectJSON.deviceExtensions);
-            })
-            // Step2: Install target and if there has deivce setting, set the editing target to stage incase there is
-            // device extensions block in sprite workspace, it will cause error.
-            .then(targets => this.installTargets(targets, projectJSON.extensions, true))
-            // Step3: Install device extension. it can get flyout blocks because the toolbox has been updated in the
-            // previous step. After loaded set the editing target to firset sprite if it has one.
-            .then(targets => this.installDeviceExtensions(projectJSON.deviceExtensions, targets));
+                // Old sb2 projects have no top level `extensions` field, and sb3 files saved by
+                // upstream scratch may omit monitor-only extensions from it. Merge the explicit
+                // list with the extension ids collected by the deserializer. Only builtin ids or
+                // ids with an explicit URL are merged: opcode prefixes of device blocks (e.g.
+                // `arduinoUno`) must not be treated as loadable scratch extensions.
+                const projectExtensions = {
+                    extensionIDs: new Set(projectJSON.extensions || []),
+                    extensionURLs: (extensions && extensions.extensionURLs) || new Map()
+                };
+                if (extensions && extensions.extensionIDs) {
+                    extensions.extensionIDs.forEach(extensionID => {
+                        if (this.extensionManager.isBuiltinExtension(extensionID) ||
+                            projectExtensions.extensionURLs.has(extensionID)) {
+                            projectExtensions.extensionIDs.add(extensionID);
+                        }
+                    });
+                }
+
+                // Step1: Install device first.
+                return Promise.resolve(
+                    this.installDevice(targets, device, projectJSON.programMode, projectJSON.deviceExtensions)
+                )
+                    // Step2: Install target and if there has deivce setting, set the editing target to stage
+                    // incase there is device extensions block in sprite workspace, it will cause error.
+                    .then(installedTargets => this.installTargets(installedTargets, projectExtensions, true))
+                    // Step3: Install device extension. it can get flyout blocks because the toolbox has been
+                    // updated in the previous step. After loaded set the editing target to firset sprite if
+                    // it has one.
+                    .then(installedTargets =>
+                        this.installDeviceExtensions(projectJSON.deviceExtensions, installedTargets));
+            });
     }
 
     /**

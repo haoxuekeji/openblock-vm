@@ -18,9 +18,13 @@ class TestInternalExtension {
         this.status.constructorCalled = true;
     }
 
+    get EXTENSION_ID () {
+        return 'testInternalExtension';
+    }
+
     getInfo () {
         this.status.getInfoCalled = true;
-        return {
+        return [{
             id: 'testInternalExtension',
             name: 'Test Internal Extension',
             blocks: [
@@ -32,7 +36,7 @@ class TestInternalExtension {
                 simpleMenu: this._buildAMenu(),
                 dynamicMenu: '_buildDynamicMenu'
             }
-        };
+        }];
     }
 
     go (args, util, blockInfo) {
