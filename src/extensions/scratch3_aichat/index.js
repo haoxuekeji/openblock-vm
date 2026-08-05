@@ -31,6 +31,43 @@ const getAiChatEndpoint = () => {
 };
 
 /**
+ * Runtime token context for shared projects (SEC-033). The platform issues a
+ * short lived `project_runtime_token` per public share so runtime AI calls
+ * are attributed and quota controlled. A hosting page can either provide the
+ * token itself or just expose the share code; without any of them the block
+ * falls back to the restricted anonymous compatibility mode of the backend.
+ * @returns {?string} - the share code of the current public share, if known.
+ */
+const getShareCode = () => {
+    if (typeof window === 'undefined') return null;
+    if (window.OpenBlockAiChatShareCode) {
+        return String(window.OpenBlockAiChatShareCode);
+    }
+    // Inside the editor iframe of the public share player the referrer is the
+    // parent share page, e.g. https://host/share/<code>.
+    try {
+        const referrer = (typeof document !== 'undefined' && document.referrer) || '';
+        if (!referrer) return null;
+        const match = new URL(referrer).pathname.match(/^\/share\/([a-z0-9]{4,32})\/?$/);
+        return match ? match[1] : null;
+    } catch (e) {
+        return null;
+    }
+};
+
+/**
+ * Refresh the runtime token when it expires within this margin, milliseconds.
+ * @type {number}
+ */
+const TOKEN_REFRESH_MARGIN = 60 * 1000;
+
+/**
+ * Valid controlled persona modes accepted by the backend.
+ * @type {Array.<string>}
+ */
+const PERSONA_MODES = ['child_qa', 'character_roleplay', 'project_knowledge'];
+
+/**
  * How many past exchanges to send for multi turn conversations.
  * @type {number}
  */
@@ -85,6 +122,89 @@ class Scratch3AiChatBlocks {
          * @type {boolean}
          */
         this._thinking = false;
+
+        /**
+         * Cached project runtime token and its expiry (unix ms).
+         * @type {?string}
+         */
+        this._runtimeToken = null;
+        this._runtimeTokenExpiresAt = 0;
+
+        /**
+         * In flight token request, to deduplicate concurrent asks.
+         * @type {?Promise}
+         */
+        this._runtimeTokenPromise = null;
+
+        /**
+         * Set when the backend has no /runtime-token endpoint (legacy
+         * deployment); stops useless refetch attempts.
+         * @type {boolean}
+         */
+        this._runtimeTokenUnsupported = false;
+    }
+
+    /**
+     * Acquire a runtime token, preferring hooks provided by the hosting page
+     * and falling back to a self service fetch keyed by the share code.
+     * Resolves to null when no token can be obtained; the ask then runs in
+     * the restricted anonymous compatibility mode.
+     * @param {boolean} force - discard the cached token and fetch a new one.
+     * @return {Promise.<?string>} - the token or null.
+     */
+    _acquireRuntimeToken (force) {
+        if (typeof window === 'undefined') return Promise.resolve(null);
+        if (typeof window.OpenBlockAiChatTokenProvider === 'function') {
+            return Promise.resolve()
+                .then(() => window.OpenBlockAiChatTokenProvider(Boolean(force)))
+                .then(token => {
+                    if (!token) return null;
+                    return String(token);
+                })
+                .catch(err => {
+                    log.warn(`AI chat token provider failed: ${err}`);
+                    return null;
+                });
+        }
+        if (window.OpenBlockAiChatRuntimeToken) {
+            return Promise.resolve(String(window.OpenBlockAiChatRuntimeToken));
+        }
+        const shareCode = getShareCode();
+        if (!shareCode || this._runtimeTokenUnsupported) return Promise.resolve(null);
+        if (!force && this._runtimeToken &&
+            Date.now() < this._runtimeTokenExpiresAt - TOKEN_REFRESH_MARGIN) {
+            return Promise.resolve(this._runtimeToken);
+        }
+        if (this._runtimeTokenPromise) return this._runtimeTokenPromise;
+        this._runtimeTokenPromise = fetch(`${getAiChatEndpoint()}/runtime-token`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({share_code: shareCode})
+        })
+            .then(res => {
+                if (res.status === 404) {
+                    this._runtimeTokenUnsupported = true;
+                    return null;
+                }
+                if (!res.ok) throw new Error(`runtime token http ${res.status}`);
+                return res.json();
+            })
+            .then(data => {
+                if (!data || !data.runtime_token) return null;
+                this._runtimeToken = String(data.runtime_token);
+                const ttlSeconds = Number(data.expires_in) || 0;
+                this._runtimeTokenExpiresAt = Date.now() + (ttlSeconds * 1000);
+                return this._runtimeToken;
+            })
+            .catch(err => {
+                log.warn(`AI chat runtime token failed: ${err}`);
+                return null;
+            })
+            .then(token => {
+                this._runtimeTokenPromise = null;
+                return token;
+            });
+        return this._runtimeTokenPromise;
     }
 
     /**
@@ -182,6 +302,42 @@ class Scratch3AiChatBlocks {
     }
 
     /**
+     * Send one ask request, carrying the runtime token when available.
+     * @param {string} question - the trimmed question text.
+     * @param {?string} runtimeToken - the project runtime token, if any.
+     * @return {Promise} - resolves with the fetch response.
+     */
+    _postAsk (question, runtimeToken) {
+        const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+        const timer = controller && setTimeout(() => controller.abort(), ASK_TIMEOUT);
+
+        const body = {
+            question: question,
+            persona: this._persona,
+            history: this._history
+        };
+        if (runtimeToken) body.runtime_token = runtimeToken;
+        const personaMode = (typeof window !== 'undefined' && window.OpenBlockAiChatPersonaMode) || '';
+        if (PERSONA_MODES.indexOf(personaMode) !== -1) body.persona_mode = personaMode;
+
+        const fetchOptions = {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        };
+        if (controller) fetchOptions.signal = controller.signal;
+
+        return fetch(`${getAiChatEndpoint()}/ask`, fetchOptions)
+            .then(res => {
+                if (timer) clearTimeout(timer);
+                return res;
+            }, err => {
+                if (timer) clearTimeout(timer);
+                throw err;
+            });
+    }
+
+    /**
      * Ask the service and remember the answer.
      * @param {object} args - the block arguments.
      * @return {Promise} - resolved when the answer arrived or failed.
@@ -191,22 +347,19 @@ class Scratch3AiChatBlocks {
             .slice(0, MAX_QUESTION_LENGTH);
         if (!question) return Promise.resolve();
 
-        const controller = typeof AbortController === 'undefined' ? null : new AbortController();
-        const timer = controller && setTimeout(() => controller.abort(), ASK_TIMEOUT);
-
-        const fetchOptions = {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                question: question,
-                persona: this._persona,
-                history: this._history
-            })
-        };
-        if (controller) fetchOptions.signal = controller.signal;
-
         this._thinking = true;
-        return fetch(`${getAiChatEndpoint()}/ask`, fetchOptions)
+        return this._acquireRuntimeToken(false)
+            .then(token => this._postAsk(question, token)
+                .then(res => {
+                    // Expired or revoked token: refresh once and retry.
+                    if (res.status === 401 && token) {
+                        this._runtimeToken = null;
+                        this._runtimeTokenExpiresAt = 0;
+                        return this._acquireRuntimeToken(true)
+                            .then(fresh => this._postAsk(question, fresh));
+                    }
+                    return res;
+                }))
             .then(res => {
                 if (!res.ok) throw new Error(`ai chat http ${res.status}`);
                 return res.json();
@@ -224,7 +377,6 @@ class Scratch3AiChatBlocks {
                 this._answer = '';
             })
             .then(() => {
-                if (timer) clearTimeout(timer);
                 this._thinking = false;
             });
     }
