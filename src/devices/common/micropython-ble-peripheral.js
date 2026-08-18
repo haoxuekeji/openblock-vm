@@ -699,7 +699,12 @@ class MicroPythonBlePeripheral {
     }
 
     /**
-     * Execute python statements on the board in live mode.
+     * Execute python statements on the board in live mode. Commands go
+     * through the flow-controlled raw-paste mode when the firmware
+     * supports it: the plain raw REPL has no input flow control, so large
+     * commands (e.g. a device extension sending a whole driver class)
+     * lose bytes on the way to the board. Old firmware transparently
+     * falls back to the plain raw REPL.
      * @param {string} command - python source to execute.
      * @param {number} timeout - max time to wait for the output in ms.
      * @param {object} options - execution options.
@@ -716,7 +721,7 @@ class MicroPythonBlePeripheral {
         }
         return this._enqueueLive(() => {
             if (!this.isReady()) return null;
-            return this._execRaw(command, timeout);
+            return this._execRawPaste(command, timeout);
         });
     }
 
