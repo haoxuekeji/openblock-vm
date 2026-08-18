@@ -177,6 +177,15 @@ class ArduinoPeripheral{
     }
 
     /**
+     * Whether firmware flashing is actually supported on this channel.
+     * @return {boolean} - true, the Link server can flash the realtime
+     * (firmata) firmware for arduino type devices.
+     */
+    canUploadFirmware () {
+        return true;
+    }
+
+    /**
      * Called by the runtime when user wants to abort the uploading process.
      */
     abortUpload () {

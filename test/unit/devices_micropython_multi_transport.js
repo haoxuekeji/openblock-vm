@@ -6,6 +6,7 @@ const MicroPythonMultiTransportPeripheral = require(
 const MicroPythonBlePeripheral = require(
     '../../src/devices/common/micropython-ble-peripheral'
 );
+const CommonPeripheral = require('../../src/devices/common/common-peripheral');
 const VirtualMachine = require('../../src/virtual-machine');
 
 tap.tearDown(() => process.nextTick(process.exit));
@@ -50,6 +51,64 @@ test('MicroPython device switches transports without changing device id', t => {
     t.equal(runtime.peripheralExtensions.microPythonEsp32, peripheral);
 
     t.throws(() => peripheral.setTransport('invalid'));
+    t.end();
+});
+
+test('firmware flashing capability follows the transport', t => {
+    const runtime = makeRuntime();
+    const peripheral = new MicroPythonMultiTransportPeripheral(
+        runtime,
+        'microPythonEsp32',
+        'microPythonEsp32',
+        [],
+        {baudRate: 115200, dataBits: 8, stopBits: 1},
+        {type: 'microPython'}
+    );
+
+    t.equal(peripheral.canUploadFirmware(), true, 'link transport can flash');
+
+    peripheral.setTransport('webserial');
+    t.equal(peripheral.canUploadFirmware(), false, 'webserial can not flash');
+
+    peripheral.setTransport('webble');
+    t.equal(peripheral.canUploadFirmware(), false, 'webble can not flash');
+    t.end();
+});
+
+test('runtime reports firmware flashing capability per peripheral', t => {
+    const vm = new VirtualMachine();
+
+    t.equal(vm.canUploadFirmwareToPeripheral('microPythonEsp32'), false,
+        'no peripheral registered means no flashing');
+
+    vm.runtime.peripheralExtensions.microPythonEsp32 = {
+        canUploadFirmware: () => false,
+        uploadFirmware: () => {}
+    };
+    t.equal(vm.canUploadFirmwareToPeripheral('microPythonEsp32'), false,
+        'peripheral reported capability wins');
+
+    vm.runtime.peripheralExtensions.legacyDevice = {
+        uploadFirmware: () => {}
+    };
+    t.equal(vm.canUploadFirmwareToPeripheral('legacyDevice'), true,
+        'legacy peripherals without the capability stay enabled');
+
+    t.end();
+});
+
+test('link peripheral flashing capability depends on the uploader type', t => {
+    const makePeripheral = type => new CommonPeripheral(
+        makeRuntime(), 'device', 'device', [],
+        {baudRate: 115200, dataBits: 8, stopBits: 1},
+        {type},
+        {register: false}
+    );
+
+    t.equal(makePeripheral('arduino').canUploadFirmware(), true);
+    t.equal(makePeripheral('microPython').canUploadFirmware(), true);
+    t.equal(makePeripheral('microbit').canUploadFirmware(), false,
+        'the Link server has no microbit firmware uploader');
     t.end();
 });
 

@@ -155,6 +155,14 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
     }
 
     /**
+     * Whether firmware flashing is actually supported on this channel.
+     * @return {boolean} - false, esptool is not available in the browser.
+     */
+    canUploadFirmware () {
+        return false;
+    }
+
+    /**
      * Flashing the MicroPython firmware needs esptool, which is not
      * available in the browser. Point the user to the Link based device.
      */

@@ -157,6 +157,10 @@ class MicroPythonMultiTransportPeripheral {
         return this._call('uploadFirmware');
     }
 
+    canUploadFirmware () {
+        return this._call('canUploadFirmware', [], false);
+    }
+
     abortUpload () {
         return this._call('abortUpload');
     }

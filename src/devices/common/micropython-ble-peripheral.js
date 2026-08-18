@@ -1169,6 +1169,14 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Whether firmware flashing is actually supported on this channel.
+     * @return {boolean} - false, BLE can not carry the firmware image.
+     */
+    canUploadFirmware () {
+        return false;
+    }
+
+    /**
      * BLE channel can not flash the MicroPython firmware itself, this
      * requires the USB serial channel.
      */

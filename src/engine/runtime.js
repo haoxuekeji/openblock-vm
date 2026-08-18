@@ -2011,6 +2011,25 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Whether the specified peripheral can actually flash firmware over its
+     * current connection transport.
+     * @param {string} deviceId - the id of the device.
+     * @return {boolean} - true when uploadFirmware would really flash.
+     */
+    canUploadFirmwareToPeripheral (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral) return false;
+        if (typeof peripheral.canUploadFirmware === 'function') {
+            return Boolean(peripheral.canUploadFirmware());
+        }
+        // Peripherals that do not report the capability (e.g. third party
+        // device extensions) keep the legacy always-enabled behaviour.
+        return typeof peripheral.uploadFirmware === 'function';
+    }
+
+    /**
      * List files on the connected MicroPython board.
      * @param {string} deviceId - the id of the device.
      * @param {string} directory - board directory.

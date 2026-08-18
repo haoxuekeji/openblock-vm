@@ -468,6 +468,16 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Whether the extension's specified peripheral can actually flash
+     * firmware over its current connection transport.
+     * @param {string} extensionId - the id of the extension.
+     * @return {boolean} - true when uploadFirmware would really flash.
+     */
+    canUploadFirmwareToPeripheral (extensionId) {
+        return this.runtime.canUploadFirmwareToPeripheral(extensionId);
+    }
+
+    /**
      * Load a Scratch project from a .sb, .sb2, .sb3 or json string.
      * @param {string | object} input A json string, object, or ArrayBuffer representing the project to load.
      * @return {!Promise} Promise that resolves after targets are installed.

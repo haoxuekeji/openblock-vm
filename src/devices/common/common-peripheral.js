@@ -76,6 +76,16 @@ class CommonPeripheral{
         this._serialport.uploadFirmware(this.diveceOpt);
     }
 
+    /**
+     * Whether firmware flashing is actually supported on this channel.
+     * The Link server only implements the arduino and microPython uploaders,
+     * other device types (e.g. microbit) would silently do nothing.
+     * @return {boolean} - true when uploadFirmware would really flash.
+     */
+    canUploadFirmware () {
+        return ['arduino', 'microPython'].indexOf(this.diveceOpt && this.diveceOpt.type) !== -1;
+    }
+
 
     /**
      * Called by the runtime when user wants to abort the uploading process.
