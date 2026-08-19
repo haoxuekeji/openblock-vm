@@ -816,17 +816,22 @@ class VirtualMachine extends EventEmitter {
         if (extensions) {
             if (extensions.extensionIDs) {
                 extensions.extensionIDs.forEach(extensionID => {
-                    if (!this.extensionManager.isExtensionLoaded(extensionID)) {
-                        const extensionURL = extensions.extensionURLs.get(extensionID) || extensionID;
+                    if (this.extensionManager.isExtensionLoaded(extensionID)) return;
+                    // Deserialized extension ids collected from block opcodes may contain device
+                    // block prefixes (e.g. `microPython`), which are not loadable scratch
+                    // extensions. Only load builtin extensions or ones with an explicit URL.
+                    const extensionURL = extensions.extensionURLs.get(extensionID);
+                    if (extensionURL) {
                         allPromises.push(this.extensionManager.loadExtensionURL(extensionURL));
+                    } else if (this.extensionManager.isBuiltinExtension(extensionID)) {
+                        allPromises.push(this.extensionManager.loadExtensionURL(extensionID));
                     }
                 });
             } else {
                 extensions.forEach(extensionID => {
-                    if (!this.extensionManager.isExtensionLoaded(extensionID)) {
-                        // const extensionURL = extensions.extensionURLs.get(extensionID) || extensionID;
-                        const extensionURL = extensionID;
-                        allPromises.push(this.extensionManager.loadExtensionURL(extensionURL));
+                    if (!this.extensionManager.isExtensionLoaded(extensionID) &&
+                        this.extensionManager.isBuiltinExtension(extensionID)) {
+                        allPromises.push(this.extensionManager.loadExtensionURL(extensionID));
                     }
                 });
             }
@@ -1544,6 +1549,10 @@ class VirtualMachine extends EventEmitter {
             .map(b => sb3.getExtensionIdForOpcode(b.opcode))
             .filter(id => !!id) // Remove ids that do not exist
             .filter(id => !this.extensionManager.isExtensionLoaded(id)) // and remove loaded extensions
+            // Opcode prefixes of device blocks (e.g. `microPython`) are not loadable scratch
+            // extensions. Trying to load them would make the extension worker fetch a bogus
+            // relative URL and reject the whole copy. Same guard as in `loadProject`.
+            .filter(id => this.extensionManager.isBuiltinExtension(id))
         );
 
         // Create an array promises for extensions to load
