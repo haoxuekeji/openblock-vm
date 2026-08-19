@@ -55,6 +55,18 @@ const RAW_PASTE_BLOCK_SIZE = 4096;
 const REPL_RESPONSE_TIMEOUT = 5000;
 
 /**
+ * Live commands up to this many bytes go through the plain raw REPL:
+ * a single direction change instead of the three the raw-paste
+ * handshake needs, which matters a lot on high-latency links (each BLE
+ * direction change costs a connection interval). The limit stays well
+ * below every stdin buffer involved (UART RX 256, BLE rxbuf 1024), so
+ * the missing input flow control of the plain raw REPL is safe here;
+ * larger commands (device extension drivers) keep using raw-paste.
+ * @readonly
+ */
+const RAW_REPL_MAX_COMMAND = 256;
+
+/**
  * Python statements executed once when entering realtime (live) mode.
  * @readonly
  */
@@ -501,10 +513,12 @@ class MicroPythonBlePeripheral {
         this._replCaptureDepth++;
         try {
             this._replBuffer = '';
-            await this._writeRaw(Buffer.from(command, 'latin1'));
-            await this._writeRaw(Buffer.from('\x04'));
-            // Raw REPL replies "OK<stdout>\x04<stderr>\x04>".
-            await this._waitFor('OK');
+            // Command and end-of-input marker in one write, saving a
+            // packet on the BLE transport.
+            await this._writeRaw(Buffer.from(`${command}\x04`, 'latin1'));
+            // Raw REPL replies "OK<stdout>\x04<stderr>\x04>". The "OK"
+            // arrives before execution, so the caller timeout bounds it.
+            await this._waitFor('OK', timeout);
             const output = await this._waitFor('\x04', timeout);
             const error = await this._waitFor('\x04');
             await this._waitFor('>');
@@ -719,10 +733,47 @@ class MicroPythonBlePeripheral {
             // cached sensor reading could be stale afterwards.
             this._liveReadCache = {};
         }
-        return this._enqueueLive(() => {
+        return this._enqueueLive(async () => {
             if (!this.isReady()) return null;
-            return this._execRawPaste(command, timeout);
+            try {
+                if (Buffer.byteLength(command, 'latin1') <= RAW_REPL_MAX_COMMAND) {
+                    return await this._execRaw(command, timeout);
+                }
+                return await this._execRawPaste(command, timeout);
+            } catch (err) {
+                // A "Board error:" is a python-level failure inside a
+                // fully parsed reply, the protocol itself is healthy.
+                // Everything else (timeout, unexpected flow control)
+                // means the board and browser REPL state machines may
+                // disagree now; resync or every following live command
+                // would fail too, looking like a dead board.
+                if (!String(err && err.message).startsWith('Board error:')) {
+                    await this._recoverLiveSession();
+                }
+                throw err;
+            }
         });
+    }
+
+    /**
+     * Rebuild the live raw REPL session after a protocol-level failure:
+     * interrupt whatever state the board is stuck in and redo the live
+     * mode handshake. Board-side lazy objects are forgotten, they are
+     * recreated on demand (the board may even have rebooted).
+     * @return {Promise} - resolved when recovery finished or gave up.
+     * @private
+     */
+    async _recoverLiveSession () {
+        this._resetLiveState();
+        if (this._uploading || !this.isConnected()) return;
+        if (!(this._runtime.isRealtimeMode && this._runtime.isRealtimeMode())) return;
+        try {
+            await this._enterLiveMode();
+        } catch (e) {
+            // Still failing: stay out of live mode, the next mode switch
+            // or reconnect will retry the handshake.
+            log.warn('MicroPython live session recovery failed:', e.message);
+        }
     }
 
     /**
