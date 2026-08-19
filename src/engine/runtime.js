@@ -829,6 +829,17 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for reporting that a peripheral connection dropped
+     * unexpectedly and an automatic reconnect attempt is in progress.
+     * This causes a 'reconnecting' alert to display; it resolves into
+     * either PERIPHERAL_CONNECTED or PERIPHERAL_CONNECTION_LOST_ERROR.
+     * @const {string}
+     */
+    static get PERIPHERAL_RECONNECTING () {
+        return 'PERIPHERAL_RECONNECTING';
+    }
+
+    /**
      * Event name for reporting that a peripheral realtime connection has been lost.
      * This causes a 'peripheral connection realtime lost' error alert to display.
      * @const {string}

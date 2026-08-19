@@ -182,12 +182,13 @@ class ScratchLinkBLE extends JSONRPC {
  * Uses browser native BLE support directly without Scratch Link.
  */
 class WebBLE {
-    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback) {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback, options = {}) {
         this._availablePeripherals = {};
         this._connectCallback = connectCallback;
         this._connected = false;
         this._characteristicDidChangeCallback = null;
         this._resetCallback = resetCallback;
+        this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
         this._discoverTimeoutID = null;
         this._deviceId = deviceId;
         this._peripheralOptions = peripheralOptions;
@@ -474,6 +475,15 @@ class WebBLE {
             this.disconnect({silent: true});
             return;
         }
+        if (this._onUnexpectedDisconnect) {
+            // Tear the GATT state down silently and hand over to the
+            // owner, which drives an automatic reconnect using the still
+            // granted device handle and reports the loss itself only
+            // when that fails.
+            this.disconnect({silent: true});
+            this._onUnexpectedDisconnect();
+            return;
+        }
         this.disconnect();
         if (this._resetCallback) {
             this._resetCallback();
@@ -523,6 +533,10 @@ class WebBLE {
  * @param {object} resetCallback - a callback for resetting extension state.
  * @param {object} options - backend selection options.
  * @param {boolean} options.webOnly - do not fall back to Scratch Link.
+ * @param {Function} options.onUnexpectedDisconnect - when set, an unexpected
+ *   GATT disconnect is handed to this callback (after a silent teardown)
+ *   instead of emitting the connection-lost error, so the owner can try an
+ *   automatic reconnect first. Web Bluetooth backend only.
  */
 class BLE {
     constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null, options = {}) {
@@ -532,6 +546,7 @@ class BLE {
         this._connectCallback = connectCallback;
         this._resetCallback = resetCallback;
         this._webOnly = options.webOnly === true;
+        this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
 
         this._backend = null;
 
@@ -560,7 +575,8 @@ class BLE {
     _tryWebBluetooth () {
         const webBLE = new WebBLE(
             this._runtime, this._deviceId, this._peripheralOptions,
-            this._connectCallback, this._resetCallback
+            this._connectCallback, this._resetCallback,
+            {onUnexpectedDisconnect: this._onUnexpectedDisconnect}
         );
         // Set backend immediately so connectPeripheral can find it
         // after PERIPHERAL_LIST_UPDATE is emitted

@@ -55,6 +55,28 @@ const RAW_PASTE_BLOCK_SIZE = 4096;
 const REPL_RESPONSE_TIMEOUT = 5000;
 
 /**
+ * Max GATT connection attempts of one automatic reconnect run.
+ * @readonly
+ */
+const RECONNECT_ATTEMPTS = 8;
+
+/**
+ * Wait before the first reconnect attempt after an upload soft reboot:
+ * the board needs to reboot and bring BLE advertising back up (the
+ * firmware advertises fast for 30s after boot, so this is enough for
+ * the common case and the retry loop covers slow boards).
+ * @readonly
+ */
+const POST_UPLOAD_RECONNECT_DELAY = 1500;
+
+/**
+ * Wait before the first reconnect attempt after an unexpected
+ * connection drop; gives the browser stack a moment to settle.
+ * @readonly
+ */
+const DROP_RECONNECT_DELAY = 300;
+
+/**
  * Live commands up to this many bytes go through the plain raw REPL:
  * a single direction change instead of the three the raw-paste
  * handshake needs, which matters a lot on high-latency links (each BLE
@@ -153,6 +175,27 @@ class MicroPythonBlePeripheral {
         this._abort = false;
 
         /**
+         * Whether an automatic reconnect run after an unexpected
+         * connection drop is currently in progress.
+         * @type {boolean}
+         */
+        this._reconnecting = false;
+
+        /**
+         * True from an unexpected connection drop until the channel is
+         * usable again (or given up); makes in-flight REPL exchanges
+         * fail fast instead of running into their timeout.
+         * @type {boolean}
+         */
+        this._connectionDropped = false;
+
+        /**
+         * Last error seen by the reconnect loop, for the failure report.
+         * @type {?Error}
+         */
+        this._lastReconnectError = null;
+
+        /**
          * How many raw REPL exchanges are currently in flight. Incoming
          * data is captured into _replBuffer only while this is > 0 (or an
          * upload is running); everything else, e.g. asynchronous prints
@@ -215,6 +258,7 @@ class MicroPythonBlePeripheral {
         this._onConnect = this._onConnect.bind(this);
         this._onMessage = this._onMessage.bind(this);
         this._handleProgramModeUpdate = this._handleProgramModeUpdate.bind(this);
+        this._handleConnectionDrop = this._handleConnectionDrop.bind(this);
     }
 
     /**
@@ -228,13 +272,17 @@ class MicroPythonBlePeripheral {
             // can make the connection modal leave the scanning phase.
             this._ble.disconnect({silent: true});
         }
+        // The user is picking a (possibly different) device: a pending
+        // automatic reconnect run must stop touching this._ble.
+        this._connectionDropped = false;
         this._ble = new BLE(this._runtime, this._originalDeviceId, {
             filters: [
                 {services: [NUS_SERVICE]},
                 {namePrefix: 'OB32', services: [NUS_SERVICE]}
             ]
         }, this._onConnect, this.reset, {
-            webOnly: this._webBluetoothOnly
+            webOnly: this._webBluetoothOnly,
+            onUnexpectedDisconnect: this._handleConnectionDrop
         });
     }
 
@@ -266,6 +314,7 @@ class MicroPythonBlePeripheral {
         this._replBuffer = '';
         this._uploading = false;
         this._abort = false;
+        this._connectionDropped = false;
         this._replCaptureDepth = 0;
         // The next connection may be a different board/firmware.
         this._rawPasteSupported = null;
@@ -365,6 +414,15 @@ class MicroPythonBlePeripheral {
      * @private
      */
     _onConnect () {
+        // The channel is usable again, pending exchanges may run.
+        this._connectionDropped = false;
+        // Every GATT session negotiates its own ATT MTU; a reconnected
+        // link may have a smaller one than the last session, and writes
+        // sized to a stale larger MTU would fail. Use the safe minimum
+        // until the probe has read the fresh value back from the board.
+        this._bleMtuProbed = false;
+        this._bleChunkSize = BLE_CHUNK_SIZE;
+
         const notificationSetup = this._ble.startNotifications(NUS_SERVICE, NUS_TX, this._onMessage);
 
         // Initialize runtime state as soon as GATT is connected. Chrome can
@@ -467,6 +525,14 @@ class MicroPythonBlePeripheral {
                 if (this._abort) {
                     clearTimeout(timer);
                     reject(new Error('Aborted'));
+                    return;
+                }
+                if (this._connectionDropped) {
+                    // The link is gone, the awaited bytes can never
+                    // arrive; fail now instead of running into the
+                    // timeout while the automatic reconnect runs.
+                    clearTimeout(timer);
+                    reject(new Error('Connection lost'));
                     return;
                 }
                 const taken = tryTake();
@@ -1167,39 +1233,17 @@ class MicroPythonBlePeripheral {
             this._ble.disconnect({silent: true});
         }
         this._sendstd('Waiting for the board to reboot...\n');
-        await this._reconnect();
-    }
-
-    /**
-     * Reconnect to the board after a soft reboot. The Web Bluetooth device
-     * handle stays valid, so no new device chooser is needed.
-     * @return {Promise} - resolved when reconnected or retries exhausted.
-     * @private
-     */
-    async _reconnect () {
-        // ESP32 BLE advertising can take several seconds to return after a
-        // soft reboot. Retry the actual GATT promise and wait for notification
-        // subscription (_onConnect) before considering the channel usable.
-        await wait(2500);
-        const maxRetries = 8;
-        let lastError = null;
-        for (let retry = 0; retry < maxRetries; retry++) {
-            if (this._abort) return false;
-            try {
-                const connected = await this._ble.connectPeripheral(this._peripheralId, {silent: true});
-                if (connected && this.isConnected()) {
-                    this._sendstd('Bluetooth reconnected.\n');
-                    return true;
-                }
-            } catch (error) {
-                lastError = error;
-            }
-            await wait(1000 + (retry * 250));
-        }
+        const connected = await this._reconnect({
+            initialDelayMs: POST_UPLOAD_RECONNECT_DELAY,
+            shouldContinue: () => !this._abort,
+            verbose: true
+        });
+        if (connected || this._abort) return;
 
         // Reconnect has definitively failed. Now publish the disconnected
         // state so the menu bar and an open connection modal agree.
         this._ble.disconnect();
+        const lastError = this._lastReconnectError;
         const detail = lastError && lastError.message ? ` (${lastError.message})` : '';
         const message = `Could not reconnect automatically${detail}. Please reconnect the device manually.`;
         this._sendstd(`${message}\n`);
@@ -1207,7 +1251,90 @@ class MicroPythonBlePeripheral {
             message,
             deviceId: this._deviceId
         });
+    }
+
+    /**
+     * Reconnect to the board using the still granted Web Bluetooth device
+     * handle, no new device chooser is needed. Used after an upload soft
+     * reboot and after an unexpected connection drop.
+     * @param {object} options - reconnect options.
+     * @param {number} options.initialDelayMs - wait before the first try,
+     *   e.g. the board reboot time.
+     * @param {number} options.attempts - max GATT connection attempts.
+     * @param {Function} options.shouldContinue - polled before every
+     *   attempt; return false to stop retrying (user abort/new scan).
+     * @param {boolean} options.verbose - log progress to the upload console.
+     * @return {Promise<boolean>} - true when the channel is usable again.
+     * @private
+     */
+    async _reconnect ({
+        initialDelayMs = POST_UPLOAD_RECONNECT_DELAY,
+        attempts = RECONNECT_ATTEMPTS,
+        shouldContinue = null,
+        verbose = false
+    } = {}) {
+        this._lastReconnectError = null;
+        await wait(initialDelayMs);
+        for (let retry = 0; retry < attempts; retry++) {
+            if (shouldContinue && !shouldContinue()) return false;
+            try {
+                // Wait for notification subscription (_onConnect) before
+                // considering the channel usable.
+                const connected = await this._ble.connectPeripheral(this._peripheralId, {silent: true});
+                if (connected && this.isConnected()) {
+                    if (verbose) this._sendstd('Bluetooth reconnected.\n');
+                    return true;
+                }
+            } catch (error) {
+                this._lastReconnectError = error;
+            }
+            await wait(1000 + (retry * 250));
+        }
         return false;
+    }
+
+    /**
+     * Called by the Web Bluetooth backend when the GATT link dropped
+     * unexpectedly (board reboot or brown-out, out of range). The firmware
+     * advertises fast for 30s after a disconnect and the granted device
+     * handle can be reconnected without a chooser, so try to get the
+     * session back silently; only report a lost connection when that
+     * fails. On success the realtime session is rebuilt by _onConnect.
+     * @return {Promise} - resolved when the run finished either way.
+     * @private
+     */
+    async _handleConnectionDrop () {
+        if (this._reconnecting) return;
+        this._reconnecting = true;
+        try {
+            // Fail in-flight raw REPL exchanges fast instead of letting
+            // them run into their timeouts; the board-side live session
+            // is stale now anyway and is rebuilt after the reconnect.
+            this._connectionDropped = true;
+            this._resetLiveState();
+            this._notifyReplWaiters();
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECONNECTING, {
+                deviceId: this._deviceId
+            });
+            const connected = await this._reconnect({
+                initialDelayMs: DROP_RECONNECT_DELAY,
+                // reset() clears the flag when the user disconnects or
+                // starts a new scan meanwhile; stop retrying then.
+                shouldContinue: () => this._connectionDropped
+            });
+            if (connected) return;
+            if (!this._connectionDropped) return;
+            // Give up: publish the loss the same way an unexpected
+            // disconnect did before automatic reconnects existed.
+            this._ble.disconnect();
+            this.reset();
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTION_LOST_ERROR, {
+                message: 'Scratch lost connection to',
+                deviceId: this._deviceId
+            });
+        } finally {
+            this._reconnecting = false;
+        }
     }
 
     /**

@@ -160,6 +160,9 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_CONNECTION_LOST_ERROR, data =>
             this.emit(Runtime.PERIPHERAL_CONNECTION_LOST_ERROR, data)
         );
+        this.runtime.on(Runtime.PERIPHERAL_RECONNECTING, data =>
+            this.emit(Runtime.PERIPHERAL_RECONNECTING, data)
+        );
         this.runtime.on(Runtime.PERIPHERAL_REALTIME_CONNECTION_LOST_ERROR, data =>
             this.emit(Runtime.PERIPHERAL_REALTIME_CONNECTION_LOST_ERROR, data)
         );
