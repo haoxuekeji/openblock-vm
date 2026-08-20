@@ -92,7 +92,7 @@ test('python-level board errors do not tear down the live session', async t => {
     t.end();
 });
 
-test('a protocol timeout resyncs the raw REPL instead of wedging', async t => {
+test('a protocol timeout resyncs the raw REPL and retries the command once', async t => {
     let dropReplies = 1;
     const {peripheral, writes} = makeLivePeripheral((text, reply) => {
         if (text === '\r\x03\x03') return;
@@ -111,13 +111,44 @@ test('a protocol timeout resyncs the raw REPL instead of wedging', async t => {
         }
     });
 
-    const failed = await peripheral.execLive('p4.value(1)', 50);
-    t.equal(failed, null, 'timed out command reports null');
+    const output = await peripheral.execLive('p4.value(1)', 50);
+    t.equal(output, '', 'command answered by the post-resync retry');
     t.ok(writes.includes('\r\x03\x03'), 'board interrupted for resync');
     t.ok(writes.includes('\r\x01'), 'raw REPL re-entered');
     t.ok(peripheral._liveReady, 'live session usable again');
+    t.equal(writes.filter(text => text === 'p4.value(1)\x04').length, 2,
+        'the failed command was retried once');
 
-    const output = await peripheral.execLive('p4.value(0)', 50);
-    t.equal(output, '', 'next command works without reconnecting');
+    const next = await peripheral.execLive('p4.value(0)', 50);
+    t.equal(next, '', 'next command works without reconnecting');
+    t.end();
+});
+
+test('a desynced first command heals well below the execution timeout', async t => {
+    let dropReplies = 1;
+    const {peripheral} = makeLivePeripheral((text, reply) => {
+        if (text === '\r\x03\x03') return;
+        if (text === '\r\x01') {
+            reply('raw REPL; CTRL-B to exit\r\n>');
+            return;
+        }
+        if (text.endsWith('\x04')) {
+            if (dropReplies > 0) {
+                dropReplies--;
+                return;
+            }
+            // Raw REPL reply: OK<stdout>\x04<stderr>\x04>
+            reply('OK42\r\n\x04\x04>');
+        }
+    });
+
+    // Default timeout (5s): the tight OK-ack timeout must detect the
+    // desync early, resync and retry, answering correctly in well under
+    // half the old worst case.
+    const start = Date.now();
+    const output = await peripheral.execLive('print(42)');
+    const elapsed = Date.now() - start;
+    t.equal(String(output).trim(), '42', 'retried command returned the real value');
+    t.ok(elapsed < 3000, `self-healed in ${elapsed}ms (was: full 5s timeout + null)`);
     t.end();
 });

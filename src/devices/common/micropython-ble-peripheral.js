@@ -55,6 +55,17 @@ const RAW_PASTE_BLOCK_SIZE = 4096;
 const REPL_RESPONSE_TIMEOUT = 5000;
 
 /**
+ * Timeout for the "OK" acknowledgement of a live raw REPL command. The
+ * board sends it right after receiving the end-of-input byte, before it
+ * even starts executing, so a missing OK means the REPL state machines
+ * are out of sync; waiting the full response timeout (sized for slow
+ * command execution) would stretch the worst case to 5s. One BLE round
+ * trip on a congested link stays well below this.
+ * @readonly
+ */
+const LIVE_ACK_TIMEOUT = 1000;
+
+/**
  * Max GATT connection attempts of one automatic reconnect run.
  * @readonly
  */
@@ -677,10 +688,14 @@ class MicroPythonBlePeripheral {
      * Execute one command in raw REPL mode and wait for completion.
      * @param {string} command - python source to execute.
      * @param {number} timeout - max time to wait for the output in ms.
+     * @param {object} options - execution options.
+     * @param {number} options.ackTimeout - max time to wait for the "OK"
+     *   acknowledgement; a desynced REPL is detected this much faster
+     *   than a slow command execution. Defaults to the full timeout.
      * @return {Promise} - resolved when the command finished.
      * @private
      */
-    async _execRaw (command, timeout = REPL_RESPONSE_TIMEOUT) {
+    async _execRaw (command, timeout = REPL_RESPONSE_TIMEOUT, options = {}) {
         this._replCaptureDepth++;
         try {
             this._replBuffer = '';
@@ -690,8 +705,9 @@ class MicroPythonBlePeripheral {
             // non-ascii payload (e.g. Chinese print text or device names).
             await this._writeRaw(Buffer.from(`${command}\x04`, 'utf8'));
             // Raw REPL replies "OK<stdout>\x04<stderr>\x04>". The "OK"
-            // arrives before execution, so the caller timeout bounds it.
-            await this._waitFor('OK', timeout);
+            // arrives before execution starts, so it may use a tighter
+            // timeout than the execution-bound stdout wait.
+            await this._waitFor('OK', Math.min(timeout, options.ackTimeout || timeout));
             const output = await this._waitFor('\x04', timeout);
             const error = await this._waitFor('\x04');
             await this._waitFor('>');
@@ -951,11 +967,17 @@ class MicroPythonBlePeripheral {
                 this._reportLiveUnavailable();
                 return null;
             }
-            try {
+            const run = () => {
                 if (Buffer.byteLength(command, 'utf8') <= RAW_REPL_MAX_COMMAND) {
-                    return await this._execRaw(command, timeout);
+                    // The tight ack timeout detects a desynced REPL fast
+                    // (the OK arrives before execution); the stdout wait
+                    // keeps the full execution-bound timeout.
+                    return this._execRaw(command, timeout, {ackTimeout: LIVE_ACK_TIMEOUT});
                 }
-                return await this._execRawPaste(command, timeout);
+                return this._execRawPaste(command, timeout);
+            };
+            try {
+                return await run();
             } catch (err) {
                 // A "Board error:" is a python-level failure inside a
                 // fully parsed reply, the protocol itself is healthy.
@@ -963,14 +985,30 @@ class MicroPythonBlePeripheral {
                 // means the board and browser REPL state machines may
                 // disagree now; resync or every following live command
                 // would fail too, looking like a dead board.
-                if (!String(err && err.message).startsWith('Board error:')) {
-                    // The caller sees null for this command: raise the
-                    // "channel down" hint even if the recovery right after
-                    // succeeds, so users can tell fake values apart.
-                    this._reportLiveUnavailable();
-                    await this._recoverLiveSession();
+                if (String(err && err.message).startsWith('Board error:')) {
+                    throw err;
                 }
-                throw err;
+                // Resync and retry the command once, so a transient
+                // desync (e.g. the first batch after the green flag)
+                // still answers this very block with a correct value
+                // instead of a null after the full timeout.
+                await this._recoverLiveSession();
+                if (!this.isReady()) {
+                    this._reportLiveUnavailable();
+                    throw err;
+                }
+                try {
+                    return await run();
+                } catch (retryErr) {
+                    if (!String(retryErr && retryErr.message).startsWith('Board error:')) {
+                        // The retry failed at protocol level too: the
+                        // caller sees null now, raise the channel hint
+                        // and leave a fresh session behind.
+                        this._reportLiveUnavailable();
+                        await this._recoverLiveSession();
+                    }
+                    throw retryErr;
+                }
             }
         });
     }

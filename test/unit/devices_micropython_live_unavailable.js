@@ -94,7 +94,7 @@ test('no hint when disconnected, in upload mode or without a prior hint', async 
     t.end();
 });
 
-test('a protocol-level live failure raises the hint before recovery', async t => {
+test('a transient protocol failure is healed by the retry without a hint', async t => {
     const {peripheral, events} = makePeripheral();
     peripheral._liveReady = true;
     let dropReplies = 1;
@@ -108,10 +108,39 @@ test('a protocol-level live failure raises the hint before recovery', async t =>
         return baseWrite(buffer);
     };
 
-    const failed = await peripheral.execLive('p4.value(1)', 50);
-    t.equal(failed, null, 'timed out command reports null');
-    t.equal(countOf(events, 'PERIPHERAL_LIVE_UNAVAILABLE'), 1, 'hint raised on the failure');
+    const output = await peripheral.execLive('p4.value(1)', 50);
+    t.equal(output, '', 'command answered by the post-resync retry');
     t.ok(peripheral._liveReady, 'session recovered');
-    t.equal(countOf(events, 'PERIPHERAL_LIVE_AVAILABLE'), 1, 'hint withdrawn after recovery');
+    t.equal(countOf(events, 'PERIPHERAL_LIVE_UNAVAILABLE'), 0,
+        'no channel-down hint for a self-healed command');
+    t.end();
+});
+
+test('a failed session rebuild raises the hint and reports null', async t => {
+    const {peripheral, events} = makePeripheral();
+    peripheral._liveReady = true;
+    // The command reply is lost (protocol desync) and the recovery
+    // prologue fails with a board error: the rebuild cannot succeed, so
+    // the block sees null and the channel-down hint must be raised.
+    let commandWrites = 0;
+    peripheral._writeRaw = buffer => {
+        const text = buffer.toString('latin1');
+        const reply = answer => peripheral._routeIncoming(Buffer.from(answer, 'latin1'));
+        if (text === '\r\x01') {
+            reply('raw REPL; CTRL-B to exit\r\n>');
+        } else if (text.endsWith('\x04') && !text.startsWith('\x05')) {
+            commandWrites++;
+            if (commandWrites > 1) {
+                // Recovery prologue: fail fast at board level.
+                reply('OK\x04import broken\x04>');
+            }
+        }
+        return Promise.resolve();
+    };
+
+    const failed = await peripheral.execLive('p4.value(1)', 50);
+    t.equal(failed, null, 'command reports null');
+    t.notOk(peripheral._liveReady, 'session stayed down');
+    t.equal(countOf(events, 'PERIPHERAL_LIVE_UNAVAILABLE'), 1, 'hint raised once');
     t.end();
 });
