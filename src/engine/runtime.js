@@ -840,6 +840,26 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for reporting that the realtime (live) command channel of a
+     * connected peripheral is not usable right now: blocks return null/0
+     * until it is rebuilt. Emitted throttled while blocks keep running so
+     * the GUI can show a non-blocking hint instead of fake data.
+     * @const {string}
+     */
+    static get PERIPHERAL_LIVE_UNAVAILABLE () {
+        return 'PERIPHERAL_LIVE_UNAVAILABLE';
+    }
+
+    /**
+     * Event name for reporting that the realtime (live) command channel is
+     * usable again after PERIPHERAL_LIVE_UNAVAILABLE was reported.
+     * @const {string}
+     */
+    static get PERIPHERAL_LIVE_AVAILABLE () {
+        return 'PERIPHERAL_LIVE_AVAILABLE';
+    }
+
+    /**
      * Event name for reporting that a peripheral realtime connection has been lost.
      * This causes a 'peripheral connection realtime lost' error alert to display.
      * @const {string}

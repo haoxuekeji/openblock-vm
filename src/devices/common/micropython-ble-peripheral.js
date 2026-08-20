@@ -94,6 +94,14 @@ const LIVE_WATCHDOG_INTERVAL = 1000;
 const LIVE_WATCHDOG_STALL_TIME = 3000;
 
 /**
+ * Minimum spacing between two PERIPHERAL_LIVE_UNAVAILABLE emissions.
+ * Blocks in a forever loop hit the not-ready path many times per second,
+ * the GUI only needs to learn about the state once in a while.
+ * @readonly
+ */
+const LIVE_UNAVAILABLE_EMIT_THROTTLE = 1000;
+
+/**
  * Live commands up to this many bytes go through the plain raw REPL:
  * a single direction change instead of the three the raw-paste
  * handshake needs, which matters a lot on high-latency links (each BLE
@@ -293,6 +301,15 @@ class MicroPythonBlePeripheral {
         this._liveWatchdogIntervalMs = LIVE_WATCHDOG_INTERVAL;
         this._liveWatchdogStallMs = LIVE_WATCHDOG_STALL_TIME;
 
+        /**
+         * Live-channel availability reporting: when the last
+         * PERIPHERAL_LIVE_UNAVAILABLE was emitted (throttle) and whether
+         * one is outstanding (an AVAILABLE event is owed on recovery).
+         * @type {number} / @type {boolean}
+         */
+        this._lastLiveUnavailableEmit = 0;
+        this._liveUnavailableAnnounced = false;
+
         this.reset = this.reset.bind(this);
         this._onConnect = this._onConnect.bind(this);
         this._onMessage = this._onMessage.bind(this);
@@ -351,6 +368,10 @@ class MicroPythonBlePeripheral {
      */
     reset () {
         this._stopLiveWatchdog();
+        // No PERIPHERAL_LIVE_AVAILABLE here: the connection is gone and the
+        // GUI clears the hint on PERIPHERAL_DISCONNECTED itself.
+        this._liveUnavailableAnnounced = false;
+        this._lastLiveUnavailableEmit = 0;
         this._replBuffer = '';
         this._uploading = false;
         this._abort = false;
@@ -830,6 +851,7 @@ class MicroPythonBlePeripheral {
             await this._waitFor('>');
             await this._probeBleMtu();
             await this._execRaw(LIVE_PROLOGUE);
+            this._reportLiveAvailable();
         } catch (err) {
             this._liveReady = false;
             throw err;
@@ -873,14 +895,20 @@ class MicroPythonBlePeripheral {
      * @return {Promise<string>} - stdout of the command, null when not ready.
      */
     execLive (command, timeout = REPL_RESPONSE_TIMEOUT, options = {}) {
-        if (!this.isReady()) return Promise.resolve(null);
+        if (!this.isReady()) {
+            this._reportLiveUnavailable();
+            return Promise.resolve(null);
+        }
         if (options.isReadOnly !== true) {
             // The command may move pins or reconfigure peripherals, any
             // cached sensor reading could be stale afterwards.
             this._liveReadCache = {};
         }
         return this._enqueueLive(async () => {
-            if (!this.isReady()) return null;
+            if (!this.isReady()) {
+                this._reportLiveUnavailable();
+                return null;
+            }
             try {
                 if (Buffer.byteLength(command, 'utf8') <= RAW_REPL_MAX_COMMAND) {
                     return await this._execRaw(command, timeout);
@@ -894,6 +922,10 @@ class MicroPythonBlePeripheral {
                 // disagree now; resync or every following live command
                 // would fail too, looking like a dead board.
                 if (!String(err && err.message).startsWith('Board error:')) {
+                    // The caller sees null for this command: raise the
+                    // "channel down" hint even if the recovery right after
+                    // succeeds, so users can tell fake values apart.
+                    this._reportLiveUnavailable();
                     await this._recoverLiveSession();
                 }
                 throw err;
@@ -920,6 +952,40 @@ class MicroPythonBlePeripheral {
             // or reconnect will retry the handshake.
             log.warn('MicroPython live session recovery failed:', e.message);
         }
+    }
+
+    /**
+     * Tell the GUI (throttled) that live blocks currently return null
+     * because the live channel is unusable, so users can tell a real 0
+     * from a dead channel. Only meaningful while the peripheral is
+     * otherwise connected in realtime mode; a plain disconnect has its
+     * own GUI state already.
+     * @private
+     */
+    _reportLiveUnavailable () {
+        if (!this.isConnected() || this._uploading) return;
+        if (!(this._runtime.isRealtimeMode && this._runtime.isRealtimeMode())) return;
+        const time = Date.now();
+        if (time - this._lastLiveUnavailableEmit < LIVE_UNAVAILABLE_EMIT_THROTTLE) return;
+        this._lastLiveUnavailableEmit = time;
+        this._liveUnavailableAnnounced = true;
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_UNAVAILABLE, {
+            deviceId: this._deviceId
+        });
+    }
+
+    /**
+     * Clear a previously reported PERIPHERAL_LIVE_UNAVAILABLE state once
+     * the live session is up again.
+     * @private
+     */
+    _reportLiveAvailable () {
+        if (!this._liveUnavailableAnnounced) return;
+        this._liveUnavailableAnnounced = false;
+        this._lastLiveUnavailableEmit = 0;
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_AVAILABLE, {
+            deviceId: this._deviceId
+        });
     }
 
     /**
