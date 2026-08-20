@@ -166,6 +166,14 @@ class MicroPythonBlePeripheral {
         this._replBuffer = '';
 
         /**
+         * Monotonic count of received bytes, used to detect a quiet line
+         * (`_replBuffer` is cleared and sliced all the time, its length
+         * cannot tell whether new data is still arriving).
+         * @type {number}
+         */
+        this._rxTotal = 0;
+
+        /**
          * Wakeup callbacks of pending _waitFor* calls, notified whenever
          * new REPL data arrives or the upload is aborted.
          * @type {Array.<Function>}
@@ -462,6 +470,7 @@ class MicroPythonBlePeripheral {
      * @private
      */
     _routeIncoming (data) {
+        this._rxTotal += data.length;
         if (this._uploading || this._replCaptureDepth > 0) {
             this._replBuffer += data.toString('latin1');
             this._notifyReplWaiters();
@@ -730,6 +739,38 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Interrupt a running program and wait until the line goes quiet.
+     * A tight print loop saturates the link and the host buffers seconds
+     * worth of output; entering the raw REPL right away would time out
+     * because the banner only arrives after that backlog has drained.
+     * Quiet line = program stopped and backlog fully received.
+     * @param {number} maxWaitMs - upper bound for the drain.
+     * @private
+     */
+    async _interruptAndDrain (maxWaitMs = 8000) {
+        await this._writeRaw(Buffer.from('\r\x03\x03'));
+        const start = Date.now();
+        let lastTotal = this._rxTotal;
+        let quietPolls = 0;
+        let resent = false;
+        while (Date.now() - start < maxWaitMs && quietPolls < 3) {
+            await wait(100);
+            if (this._rxTotal === lastTotal) {
+                quietPolls++;
+                continue;
+            }
+            quietPolls = 0;
+            lastTotal = this._rxTotal;
+            // Still streaming after 2s: the interrupt may have drowned in
+            // the flood, ask once more (harmless at an idle REPL).
+            if (!resent && Date.now() - start > 2000) {
+                resent = true;
+                await this._writeRaw(Buffer.from('\x03'));
+            }
+        }
+    }
+
+    /**
      * Interrupt the running program and switch the board REPL into raw
      * mode so blocks can be executed interactively.
      * @private
@@ -743,8 +784,7 @@ class MicroPythonBlePeripheral {
         this._replCaptureDepth++;
         try {
             this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x03\x03'));
-            await wait(300);
+            await this._interruptAndDrain();
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
@@ -1126,8 +1166,7 @@ class MicroPythonBlePeripheral {
             this._sendstd('Entering raw REPL...\n');
             // Interrupt any running program, then enter raw REPL.
             this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x03\x03'));
-            await wait(300);
+            await this._interruptAndDrain();
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
@@ -1429,8 +1468,7 @@ class MicroPythonBlePeripheral {
         this._replCaptureDepth++;
         try {
             this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x03\x03'));
-            await wait(200);
+            await this._interruptAndDrain();
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
@@ -1548,8 +1586,7 @@ class MicroPythonBlePeripheral {
         this._replCaptureDepth++;
         try {
             this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x03\x03'));
-            await wait(200);
+            await this._interruptAndDrain();
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
