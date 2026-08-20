@@ -9,10 +9,10 @@ const test = tap.test;
 const storage = {};
 global.window = {
     localStorage: {
-        getItem: key => {
+        getItem (key) {
             return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null;
         },
-        setItem: (key, value) => {
+        setItem (key, value) {
             storage[key] = String(value);
         }
     },
