@@ -127,6 +127,32 @@ const LIVE_PROLOGUE = 'from machine import Pin, PWM, DAC, ADC, TouchPad\nimport 
  */
 const LIVE_READ_CACHE_TTL = 50;
 
+/**
+ * How long incoming live read requests are collected before they are
+ * flushed to the board as a single batched command. Scratch steps all
+ * threads of one tick within a few milliseconds, so a short window
+ * gathers the read blocks of every running loop into one REPL round
+ * trip; on BLE (350-600ms RTT) this multiplies the read throughput by
+ * the number of loops.
+ * @readonly
+ */
+const LIVE_READ_BATCH_WINDOW = 10;
+
+/**
+ * Max expressions per batched read command, keeping the command small
+ * enough to execute instantly on the board and the reply well below the
+ * notification backlog limits.
+ * @readonly
+ */
+const LIVE_READ_BATCH_LIMIT = 24;
+
+/**
+ * Separator between the values of one batched read reply: the ASCII
+ * record separator, which can not appear in sensor readings.
+ * @readonly
+ */
+const LIVE_READ_SEPARATOR = '\x1e';
+
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
@@ -309,6 +335,15 @@ class MicroPythonBlePeripheral {
          */
         this._lastLiveUnavailableEmit = 0;
         this._liveUnavailableAnnounced = false;
+
+        /**
+         * Read requests collected for the next batched flush, in arrival
+         * order: {expression, resolvers} entries (identical expressions
+         * within one window share an entry), plus the flush timer.
+         * @type {Array.<object>} / @type {?object}
+         */
+        this._pendingLiveReads = [];
+        this._liveReadFlushTimer = null;
 
         this.reset = this.reset.bind(this);
         this._onConnect = this._onConnect.bind(this);
@@ -1179,8 +1214,8 @@ class MicroPythonBlePeripheral {
     /**
      * Ask the board to print an expression and return the raw text.
      * Readings are cached for a short moment and concurrent reads of the
-     * same expression share one REPL round-trip, so a forever loop over
-     * several sensor blocks does not queue one exchange per block.
+     * same expression share one REPL round-trip; distinct expressions
+     * arriving within the batch window are merged into one round trip.
      * @param {string} expression - python expression to print.
      * @return {Promise<string>} - trimmed output, empty string as fallback.
      */
@@ -1192,18 +1227,101 @@ class MicroPythonBlePeripheral {
                 return Promise.resolve(cached.value);
             }
         }
-        const promise = this.execLive(`print(${expression})`, REPL_RESPONSE_TIMEOUT, {isReadOnly: true})
-            .then(output => {
-                const value = output === null ? '' : String(output).trim();
-                // Only publish if the cache was not invalidated meanwhile.
-                if (this._liveReadCache[expression] &&
-                    this._liveReadCache[expression].promise === promise) {
-                    this._liveReadCache[expression] = {value, time: Date.now()};
-                }
-                return value;
-            });
+        const promise = this._readLiveExpression(expression).then(value => {
+            // Only publish if the cache was not invalidated meanwhile.
+            if (this._liveReadCache[expression] &&
+                this._liveReadCache[expression].promise === promise) {
+                this._liveReadCache[expression] = {value, time: Date.now()};
+            }
+            return value;
+        });
         this._liveReadCache[expression] = {promise};
         return promise;
+    }
+
+    /**
+     * Queue one expression for the next batched read round trip. Loops
+     * over several sensor blocks issue their reads within the same
+     * scheduler tick; collecting them for a few milliseconds turns N
+     * round trips into one, which is what makes reading usable over BLE.
+     * @param {string} expression - python expression to evaluate.
+     * @return {Promise<string>} - trimmed value, empty string as fallback.
+     * @private
+     */
+    _readLiveExpression (expression) {
+        return new Promise(resolve => {
+            const pending = this._pendingLiveReads.find(entry => entry.expression === expression);
+            if (pending) {
+                pending.resolvers.push(resolve);
+                return;
+            }
+            this._pendingLiveReads.push({expression, resolvers: [resolve]});
+            if (this._pendingLiveReads.length >= LIVE_READ_BATCH_LIMIT) {
+                this._flushLiveReads();
+                return;
+            }
+            if (!this._liveReadFlushTimer) {
+                this._liveReadFlushTimer = setTimeout(() => this._flushLiveReads(), LIVE_READ_BATCH_WINDOW);
+            }
+        });
+    }
+
+    /**
+     * Send the collected read expressions to the board as one command
+     * and dispatch the answered values back to the waiting blocks. A
+     * failed batch (channel down, protocol error, unparseable reply)
+     * degrades to empty strings, exactly like a failed single read.
+     * @private
+     */
+    _flushLiveReads () {
+        if (this._liveReadFlushTimer) {
+            clearTimeout(this._liveReadFlushTimer);
+            this._liveReadFlushTimer = null;
+        }
+        const batch = this._pendingLiveReads;
+        if (batch.length === 0) return;
+        this._pendingLiveReads = [];
+        const finish = values => {
+            batch.forEach((entry, index) => {
+                const value = values && index < values.length ? values[index] : '';
+                entry.resolvers.forEach(resolve => resolve(value));
+            });
+        };
+        const command = batch.length === 1 ?
+            `print(${batch[0].expression})` :
+            MicroPythonBlePeripheral.buildLiveReadBatchCommand(batch.map(entry => entry.expression));
+        this.execLive(command, REPL_RESPONSE_TIMEOUT, {isReadOnly: true}).then(output => {
+            if (output === null) {
+                finish(null);
+                return;
+            }
+            if (batch.length === 1) {
+                finish([String(output).trim()]);
+                return;
+            }
+            const parts = String(output).split(LIVE_READ_SEPARATOR);
+            finish(parts.length === batch.length ? parts.map(part => part.trim()) : null);
+        });
+    }
+
+    /**
+     * Build the python command evaluating several read expressions in one
+     * round trip. Each expression is evaluated in its own try block, so a
+     * single failing sensor degrades to an empty value without hiding the
+     * readings of the others; the values are joined with a separator that
+     * can not appear in them and printed once.
+     * @param {Array.<string>} expressions - python expressions to evaluate.
+     * @return {string} - the python source.
+     */
+    static buildLiveReadBatchCommand (expressions) {
+        // The parentheses keep an expression with a top level comma from
+        // spilling into the lambda tuple.
+        const lambdas = expressions.map(expression => `lambda:(${expression})`).join(',');
+        return '_r=[]\n' +
+            `for _f in (${lambdas},):\n` +
+            ' try:_r.append(str(_f()))\n' +
+            " except:_r.append('')\n" +
+            `print('\\x1e'.join(_r))`;
     }
 
     /**
