@@ -354,9 +354,15 @@ class MicroPythonBlePeripheral {
 
     /**
      * Called by the runtime when user wants to scan for a peripheral.
-     * Opens the browser Web Bluetooth chooser filtered on the NUS service.
+     * Reuses the remembered granted device without a chooser when
+     * possible, otherwise opens the browser Web Bluetooth chooser
+     * filtered on the NUS service.
+     * @param {Array.<string>} pnpidList - unused on the BLE transport.
+     * @param {boolean} listAll - the GUI rescan flag; a user explicitly
+     *   refreshing the list wants to pick a (different) device, so the
+     *   chooser is forced instead of the silent remembered-device path.
      */
-    scan () {
+    scan (pnpidList, listAll = false) {
         if (this._ble) {
             // Replacing an old scan/connection object is internal cleanup, not
             // a user-visible disconnect. Emitting PERIPHERAL_DISCONNECTED here
@@ -373,7 +379,8 @@ class MicroPythonBlePeripheral {
             ]
         }, this._onConnect, this.reset, {
             webOnly: this._webBluetoothOnly,
-            onUnexpectedDisconnect: this._handleConnectionDrop
+            onUnexpectedDisconnect: this._handleConnectionDrop,
+            forceChooser: listAll === true
         });
     }
 

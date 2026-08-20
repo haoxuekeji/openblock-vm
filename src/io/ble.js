@@ -5,6 +5,23 @@ const WEB_BLE_CONNECT_TIMEOUT = 15000;
 const WEB_BLE_NOTIFICATION_SETUP_TIMEOUT = 2500;
 
 /**
+ * localStorage key prefix remembering the last connected Web Bluetooth
+ * device per OpenBlock device id, for chooser-free reconnects.
+ * @readonly
+ */
+const WEB_BLE_MEMORY_PREFIX = 'openblock.webble.last.';
+
+/**
+ * Chooser-free reconnects that failed during this page session, keyed by
+ * the storage key. A granted device that cannot be connected (powered
+ * off, out of range) must not trap the user in an endless silent-retry
+ * loop: the next scan falls back to the system chooser instead. Cleared
+ * by the next successful connection.
+ * @type {object}
+ */
+const autoReconnectBlocked = {};
+
+/**
  * Scratch Link based BLE backend using WebSocket + JSON-RPC.
  * This is the original implementation that communicates through Scratch Link.
  */
@@ -190,10 +207,12 @@ class WebBLE {
         this._characteristicDidChangeCallback = null;
         this._resetCallback = resetCallback;
         this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
+        this._forceChooser = options.forceChooser === true;
         this._discoverTimeoutID = null;
         this._deviceId = deviceId;
         this._peripheralOptions = peripheralOptions;
         this._runtime = runtime;
+        this._storageKey = WEB_BLE_MEMORY_PREFIX + deviceId;
 
         this._device = null;
         this._server = null;
@@ -202,6 +221,14 @@ class WebBLE {
         this._expectedDisconnect = false;
         this._silentConnect = false;
         this._connectAttempt = 0;
+
+        /**
+         * Whether the current device handle came from the chooser-free
+         * remembered-device path; a failed connect then blocks that path
+         * for the rest of the page session instead of looping.
+         * @type {boolean}
+         */
+        this._adoptedFromMemory = false;
     }
 
     requestPeripheral () {
@@ -210,6 +237,51 @@ class WebBLE {
             window.clearTimeout(this._discoverTimeoutID);
         }
 
+        return this._requestRememberedDevice().then(device => {
+            if (device) {
+                log.info('[WebBLE] Reusing granted device without chooser:', device.name, device.id);
+                this._adoptDevice(device, true);
+                return;
+            }
+            return this._requestDeviceViaChooser();
+        });
+    }
+
+    /**
+     * Look up the device of the last successful connection among the
+     * already granted devices (navigator.bluetooth.getDevices, persisted
+     * permission). Returns null when the chooser must be shown instead:
+     * chooser explicitly requested, API unavailable, nothing remembered,
+     * a failed silent attempt this session, or a lookup error.
+     * @return {Promise<?BluetoothDevice>} - the remembered device or null.
+     * @private
+     */
+    _requestRememberedDevice () {
+        if (this._forceChooser || autoReconnectBlocked[this._storageKey]) {
+            return Promise.resolve(null);
+        }
+        if (typeof navigator === 'undefined' || !navigator.bluetooth ||
+            typeof navigator.bluetooth.getDevices !== 'function') {
+            return Promise.resolve(null);
+        }
+        const rememberedId = this._recallDeviceId();
+        if (!rememberedId) {
+            return Promise.resolve(null);
+        }
+        return navigator.bluetooth.getDevices()
+            .then(devices => devices.find(device => device.id === rememberedId) || null)
+            .catch(e => {
+                log.warn('[WebBLE] getDevices failed, falling back to chooser:', e);
+                return null;
+            });
+    }
+
+    /**
+     * Open the system device chooser.
+     * @return {Promise} - resolved once the user picked a device.
+     * @private
+     */
+    _requestDeviceViaChooser () {
         const requestOptions = {};
         if (this._peripheralOptions.filters) {
             requestOptions.filters = this._peripheralOptions.filters;
@@ -223,21 +295,64 @@ class WebBLE {
         return navigator.bluetooth.requestDevice(requestOptions)
             .then(device => {
                 log.info('[WebBLE] User selected device:', device.name, device.id);
-                this._device = device;
-                device.addEventListener(
-                    'gattserverdisconnected', this.handleDisconnectError.bind(this));
-
-                const peripheralInfo = {
-                    peripheralId: device.id,
-                    name: device.name
-                };
-                this._availablePeripherals[device.id] = peripheralInfo;
-
-                this._runtime.emit(
-                    this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
-                    this._availablePeripherals
-                );
+                this._adoptDevice(device, false);
             });
+    }
+
+    /**
+     * Take a device handle (from the chooser or from the remembered
+     * granted devices) and publish it to the peripheral list. A device
+     * from memory is flagged so the GUI can skip the click and connect
+     * right away.
+     * @param {BluetoothDevice} device - the Web Bluetooth device handle.
+     * @param {boolean} fromMemory - true for the chooser-free path.
+     * @private
+     */
+    _adoptDevice (device, fromMemory) {
+        this._device = device;
+        this._adoptedFromMemory = fromMemory;
+        device.addEventListener(
+            'gattserverdisconnected', this.handleDisconnectError.bind(this));
+
+        const peripheralInfo = {
+            peripheralId: device.id,
+            name: device.name
+        };
+        if (fromMemory) {
+            peripheralInfo.rememberedDevice = true;
+        }
+        this._availablePeripherals[device.id] = peripheralInfo;
+
+        this._runtime.emit(
+            this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
+            this._availablePeripherals
+        );
+    }
+
+    /**
+     * Read the remembered device id of the last successful connection.
+     * @return {?string} - the device id or null.
+     * @private
+     */
+    _recallDeviceId () {
+        try {
+            return window.localStorage.getItem(this._storageKey);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Persist the device id after a successful connection.
+     * @param {string} id - the Web Bluetooth device id.
+     * @private
+     */
+    _rememberDeviceId (id) {
+        try {
+            window.localStorage.setItem(this._storageKey, id);
+        } catch (e) {
+            // Storage unavailable (privacy mode); reconnects keep asking.
+        }
     }
 
     connectPeripheral (id, options = {}) {
@@ -306,6 +421,10 @@ class WebBLE {
                 if (!this._connected) {
                     throw new Error('Bluetooth notifications could not be started');
                 }
+                // Remember the device for future chooser-free reconnects
+                // and unblock the silent path after an earlier failure.
+                this._rememberDeviceId(this._device.id);
+                delete autoReconnectBlocked[this._storageKey];
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
                 this._silentConnect = false;
                 return true;
@@ -331,6 +450,12 @@ class WebBLE {
                 const suppressError = this._silentConnect || silent;
                 if (connectAttempt === this._connectAttempt) {
                     this._connectAttempt += 1;
+                }
+                if (this._adoptedFromMemory) {
+                    // The remembered device could not be connected (powered
+                    // off, out of range): the next scan must fall back to
+                    // the chooser instead of silently retrying forever.
+                    autoReconnectBlocked[this._storageKey] = true;
                 }
                 this._connected = false;
                 this._silentConnect = false;
@@ -538,6 +663,9 @@ class WebBLE {
  *   GATT disconnect is handed to this callback (after a silent teardown)
  *   instead of emitting the connection-lost error, so the owner can try an
  *   automatic reconnect first. Web Bluetooth backend only.
+ * @param {boolean} options.forceChooser - always show the system device
+ *   chooser instead of silently reusing the remembered granted device
+ *   (user explicitly rescans to switch boards). Web Bluetooth backend only.
  */
 class BLE {
     constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null, options = {}) {
@@ -548,6 +676,7 @@ class BLE {
         this._resetCallback = resetCallback;
         this._webOnly = options.webOnly === true;
         this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
+        this._forceChooser = options.forceChooser === true;
 
         this._backend = null;
 
@@ -577,7 +706,10 @@ class BLE {
         const webBLE = new WebBLE(
             this._runtime, this._deviceId, this._peripheralOptions,
             this._connectCallback, this._resetCallback,
-            {onUnexpectedDisconnect: this._onUnexpectedDisconnect}
+            {
+                onUnexpectedDisconnect: this._onUnexpectedDisconnect,
+                forceChooser: this._forceChooser
+            }
         );
         // Set backend immediately so connectPeripheral can find it
         // after PERIPHERAL_LIST_UPDATE is emitted
@@ -672,3 +804,5 @@ class BLE {
 }
 
 module.exports = BLE;
+// Exposed for unit tests of the chooser-free reconnect logic.
+module.exports.WebBLE = WebBLE;
