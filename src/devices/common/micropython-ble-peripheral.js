@@ -77,6 +77,23 @@ const POST_UPLOAD_RECONNECT_DELAY = 1500;
 const DROP_RECONNECT_DELAY = 300;
 
 /**
+ * How often the live-session watchdog samples the session state.
+ * @readonly
+ */
+const LIVE_WATCHDOG_INTERVAL = 1000;
+
+/**
+ * How long "connected + realtime mode, but no live session and nothing
+ * building one" may persist before the watchdog re-runs the live
+ * handshake. Larger than the Web Serial post-reset boot wait (2500ms),
+ * so a pending legitimate handshake normally flips _liveReady before
+ * the watchdog would fire; even a duplicate entry is harmless because
+ * _enterLiveMode no-ops once the session is up.
+ * @readonly
+ */
+const LIVE_WATCHDOG_STALL_TIME = 3000;
+
+/**
  * Live commands up to this many bytes go through the plain raw REPL:
  * a single direction change instead of the three the raw-paste
  * handshake needs, which matters a lot on high-latency links (each BLE
@@ -262,6 +279,20 @@ class MicroPythonBlePeripheral {
          */
         this._liveReadCache = {};
 
+        /**
+         * Live-session watchdog state: the sampling timer, since when the
+         * session has been observed stalled (null = not stalled), and
+         * whether a watchdog-triggered recovery is still pending in the
+         * live queue. Sampling/stall thresholds live on the instance so
+         * tests can shrink them.
+         * @type {?object} / @type {?number} / @type {boolean}
+         */
+        this._liveWatchdogTimer = null;
+        this._liveStalledSince = null;
+        this._liveWatchdogRecovering = false;
+        this._liveWatchdogIntervalMs = LIVE_WATCHDOG_INTERVAL;
+        this._liveWatchdogStallMs = LIVE_WATCHDOG_STALL_TIME;
+
         this.reset = this.reset.bind(this);
         this._onConnect = this._onConnect.bind(this);
         this._onMessage = this._onMessage.bind(this);
@@ -319,6 +350,7 @@ class MicroPythonBlePeripheral {
      * Reset all the state.
      */
     reset () {
+        this._stopLiveWatchdog();
         this._replBuffer = '';
         this._uploading = false;
         this._abort = false;
@@ -442,6 +474,7 @@ class MicroPythonBlePeripheral {
         if (this._runtime.isRealtimeMode()) {
             this._enqueueLive(() => this._enterLiveMode());
         }
+        this._startLiveWatchdog();
 
         return notificationSetup.then(() => {
             if (!this.isConnected()) {
@@ -887,6 +920,73 @@ class MicroPythonBlePeripheral {
             // or reconnect will retry the handshake.
             log.warn('MicroPython live session recovery failed:', e.message);
         }
+    }
+
+    /**
+     * Start (or restart) the live-session watchdog for this connection.
+     * Reconnect races (e.g. after an upload soft reboot) can leave the
+     * board connected in realtime mode with no live session and nothing
+     * scheduled to build one; every block then silently returns null
+     * until the user toggles the program mode. The watchdog detects that
+     * stall and re-runs the live handshake.
+     * @private
+     */
+    _startLiveWatchdog () {
+        this._stopLiveWatchdog();
+        this._liveWatchdogTimer = setInterval(() => this._liveWatchdogTick(), this._liveWatchdogIntervalMs);
+        // Do not keep a node.js test process alive; no-op in browsers.
+        if (this._liveWatchdogTimer && typeof this._liveWatchdogTimer.unref === 'function') {
+            this._liveWatchdogTimer.unref();
+        }
+    }
+
+    /**
+     * Stop the live-session watchdog (connection gone or state reset).
+     * @private
+     */
+    _stopLiveWatchdog () {
+        if (this._liveWatchdogTimer) {
+            clearInterval(this._liveWatchdogTimer);
+            this._liveWatchdogTimer = null;
+        }
+        this._liveStalledSince = null;
+    }
+
+    /**
+     * One watchdog sample: when the session has been stalled longer than
+     * the threshold, enqueue a live-mode re-entry. "Stalled" requires an
+     * otherwise idle channel: a running upload, board-fs command or REPL
+     * exchange (capture depth), an ongoing reconnect and a still pending
+     * watchdog recovery all keep the watchdog quiet.
+     * @private
+     */
+    _liveWatchdogTick () {
+        const stalled =
+            !!(this._runtime.isRealtimeMode && this._runtime.isRealtimeMode()) &&
+            this.isConnected() &&
+            !this._liveReady &&
+            !this._uploading &&
+            !this._reconnecting &&
+            !this._connectionDropped &&
+            this._replCaptureDepth === 0 &&
+            !this._liveWatchdogRecovering;
+        if (!stalled) {
+            this._liveStalledSince = null;
+            return;
+        }
+        if (this._liveStalledSince === null) {
+            this._liveStalledSince = Date.now();
+            return;
+        }
+        if (Date.now() - this._liveStalledSince < this._liveWatchdogStallMs) return;
+        this._liveStalledSince = null;
+        this._liveWatchdogRecovering = true;
+        log.warn('MicroPython live session stalled, watchdog rebuilding it');
+        // _enqueueLive never rejects; clearing the flag afterwards lets a
+        // still failing session retry after the next full stall window.
+        this._enqueueLive(() => this._enterLiveMode()).then(() => {
+            this._liveWatchdogRecovering = false;
+        });
     }
 
     /**

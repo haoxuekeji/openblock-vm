@@ -126,6 +126,7 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
                 return this._enterLiveMode();
             });
         }
+        this._startLiveWatchdog();
     }
 
     /**
