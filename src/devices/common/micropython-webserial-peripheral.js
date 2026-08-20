@@ -115,7 +115,16 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
         this._runtime.removeListener(this._runtime.constructor.PROGRAM_MODE_UPDATE, this._handleProgramModeUpdate);
         this._runtime.on(this._runtime.constructor.PROGRAM_MODE_UPDATE, this._handleProgramModeUpdate);
         if (this._runtime.isRealtimeMode()) {
-            this._enqueueLive(() => this._enterLiveMode());
+            // Opening the port pulses DTR/RTS which hard-resets boards with
+            // an auto-reset circuit. Give the firmware time to boot before
+            // the live handshake, control characters sent while the chip is
+            // still booting are silently dropped and the handshake would
+            // time out, leaving the live session unusable until the next
+            // program mode toggle.
+            this._enqueueLive(async () => {
+                await wait(HARD_RESET_BOOT_TIME);
+                return this._enterLiveMode();
+            });
         }
     }
 
