@@ -225,6 +225,10 @@ class MicroPythonMultiTransportPeripheral {
         return this._call('consolePrint', [text, eol], Promise.resolve());
     }
 
+    setBleDeviceName (name) {
+        return this._call('setBleDeviceName', [name], Promise.resolve());
+    }
+
     listBoardFiles (directory) {
         return this._call('listBoardFiles', [directory], Promise.reject(new Error('Board files unsupported')));
     }

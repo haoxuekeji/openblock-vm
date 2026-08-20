@@ -943,6 +943,21 @@ class OpenBlockMicroPythonEsp32Device {
                                 defaultValue: '?'
                             }
                         }
+                    },
+                    {
+                        opcode: 'esp32SetBleName',
+                        text: formatMessage({
+                            id: 'microPythonEsp32.console.esp32SetBleName',
+                            default: 'set Bluetooth name [NAME]',
+                            description: 'microPythonEsp32 set BLE advertising name'
+                        }),
+                        blockType: BlockType.COMMAND,
+                        arguments: {
+                            NAME: {
+                                type: ArgumentType.STRING,
+                                defaultValue: 'OB32-Car'
+                            }
+                        }
                     }
                 ],
                 menus: {
@@ -1392,6 +1407,19 @@ class OpenBlockMicroPythonEsp32Device {
      */
     consoleInput () {
         return Promise.resolve('');
+    }
+
+    /**
+     * Set the BLE advertising name (realtime mode). Persisted on the
+     * board, so several boards in one room stay distinguishable.
+     * @param {object} args - the block's arguments.
+     * @return {Promise} - resolved when done.
+     */
+    esp32SetBleName (args) {
+        if (this._peripheral.setBleDeviceName) {
+            return this._peripheral.setBleDeviceName(args.NAME);
+        }
+        return Promise.resolve();
     }
 
     /**

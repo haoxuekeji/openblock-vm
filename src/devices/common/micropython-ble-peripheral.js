@@ -590,7 +590,9 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             // Command and end-of-input marker in one write, saving a
             // packet on the BLE transport.
-            await this._writeRaw(Buffer.from(`${command}\x04`, 'latin1'));
+            // utf-8: MicroPython source is utf-8; latin1 would mangle any
+            // non-ascii payload (e.g. Chinese print text or device names).
+            await this._writeRaw(Buffer.from(`${command}\x04`, 'utf8'));
             // Raw REPL replies "OK<stdout>\x04<stderr>\x04>". The "OK"
             // arrives before execution, so the caller timeout bounds it.
             await this._waitFor('OK', timeout);
@@ -646,7 +648,7 @@ class MicroPythonBlePeripheral {
             const answer = await this._waitForCount(2);
             if (answer === 'R\x01') {
                 this._rawPasteSupported = true;
-                await this._rawPasteWrite(Buffer.from(command, 'latin1'), timeout);
+                await this._rawPasteWrite(Buffer.from(command, 'utf8'), timeout);
                 // Unlike the plain raw REPL there is no leading "OK", the
                 // reply is directly "<stdout>\x04<stderr>\x04>".
                 const output = await this._waitFor('\x04', timeout);
@@ -847,7 +849,7 @@ class MicroPythonBlePeripheral {
         return this._enqueueLive(async () => {
             if (!this.isReady()) return null;
             try {
-                if (Buffer.byteLength(command, 'latin1') <= RAW_REPL_MAX_COMMAND) {
+                if (Buffer.byteLength(command, 'utf8') <= RAW_REPL_MAX_COMMAND) {
                     return await this._execRaw(command, timeout);
                 }
                 return await this._execRawPaste(command, timeout);
@@ -1112,6 +1114,24 @@ class MicroPythonBlePeripheral {
             this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA,
                 Buffer.from(output, 'latin1'));
         }
+    }
+
+    /**
+     * Set the BLE advertising name. Persisted on the board (ble_name.txt,
+     * read by obble at boot); applied immediately when the board is not
+     * connected over BLE, otherwise after the next disconnect. The adv
+     * payload budget caps the name at 26 utf-8 bytes.
+     * @param {string} name - the new device name.
+     * @return {Promise} - resolved when done.
+     */
+    async setBleDeviceName (name) {
+        let clean = String(name === null || name === undefined ? '' : name).trim();
+        if (!clean) return;
+        // Trim to the 26 byte budget without splitting a utf-8 code point.
+        while (clean.length > 0 && Buffer.byteLength(clean, 'utf8') > 26) {
+            clean = clean.slice(0, -1);
+        }
+        await this.execLive(`import obble\nobble.set_name(${pyStr(clean)})`);
     }
 
     /**
