@@ -748,6 +748,11 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
+            // Also consume the trailing "\r\n>" prompt. Over fast transports
+            // (Web Serial) it may still be in flight when the next step
+            // clears the buffer, and would then poison positional reads
+            // like the raw-paste probe answer.
+            await this._waitFor('>');
             await this._probeBleMtu();
             await this._execRaw(LIVE_PROLOGUE);
         } catch (err) {
@@ -1126,6 +1131,8 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
+            // Consume the trailing prompt, see _enterLiveMode.
+            await this._waitFor('>');
 
             await this._probeBleMtu();
 
@@ -1427,6 +1434,8 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
+            // Consume the trailing prompt, see _enterLiveMode.
+            await this._waitFor('>');
             const output = await this._execRaw(command, timeout);
             await this._writeRaw(Buffer.from('\x02'));
             // Swallow the friendly REPL banner printed after CTRL-B.
@@ -1544,6 +1553,8 @@ class MicroPythonBlePeripheral {
             this._replBuffer = '';
             await this._writeRaw(Buffer.from('\r\x01'));
             await this._waitFor('raw REPL; CTRL-B to exit');
+            // Consume the trailing prompt, see _enterLiveMode.
+            await this._waitFor('>');
             await this._execRawPaste('import ubinascii');
             await this._writeFileRaw(path, data);
             await this._writeRaw(Buffer.from('\x02'));
