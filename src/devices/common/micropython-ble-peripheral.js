@@ -164,6 +164,23 @@ const LIVE_READ_BATCH_LIMIT = 24;
  */
 const LIVE_READ_SEPARATOR = '\x1e';
 
+/**
+ * How long incoming console bytes are collected before one
+ * PERIPHERAL_RECIVE_DATA emission. A full-speed print flood arrives as
+ * thousands of tiny transport packets per second; the GUI console only
+ * needs frame-rate granularity. Chosen within one display frame so
+ * interactive echo stays imperceptible.
+ * @readonly
+ */
+const RECEIVE_FLUSH_INTERVAL = 24;
+
+/**
+ * Collected console bytes that force an immediate flush ahead of the
+ * timer, bounding both memory and latency under extreme floods.
+ * @readonly
+ */
+const RECEIVE_FLUSH_LIMIT = 4096;
+
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
@@ -356,6 +373,16 @@ class MicroPythonBlePeripheral {
         this._pendingLiveReads = [];
         this._liveReadFlushTimer = null;
 
+        /**
+         * Console bytes collected for the next aggregated
+         * PERIPHERAL_RECIVE_DATA emission, their total size and the
+         * pending flush timer.
+         * @type {Array.<Buffer>} / @type {number} / @type {?object}
+         */
+        this._receiveChunks = [];
+        this._receiveChunkBytes = 0;
+        this._receiveFlushTimer = null;
+
         this.reset = this.reset.bind(this);
         this._onConnect = this._onConnect.bind(this);
         this._onMessage = this._onMessage.bind(this);
@@ -421,6 +448,9 @@ class MicroPythonBlePeripheral {
      */
     reset () {
         this._stopLiveWatchdog();
+        // Hand the tail of the console stream to the GUI instead of
+        // dropping it with the connection.
+        this._flushConsoleData();
         // No PERIPHERAL_LIVE_AVAILABLE here: the connection is gone and the
         // GUI clears the hint on PERIPHERAL_DISCONNECTED itself.
         this._liveUnavailableAnnounced = false;
@@ -583,7 +613,45 @@ class MicroPythonBlePeripheral {
             this._notifyReplWaiters();
             return;
         }
-        this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA, data);
+        this._bufferConsoleData(data);
+    }
+
+    /**
+     * Collect console bytes and emit them aggregated: a full-speed print
+     * flood otherwise fires thousands of tiny PERIPHERAL_RECIVE_DATA
+     * events per second at the GUI. Bytes are never dropped or reordered,
+     * only concatenated; control sequences stay intact because splitting
+     * points between transport packets were arbitrary anyway.
+     * @param {Buffer} data - the console bytes.
+     * @private
+     */
+    _bufferConsoleData (data) {
+        this._receiveChunks.push(data);
+        this._receiveChunkBytes += data.length;
+        if (this._receiveChunkBytes >= RECEIVE_FLUSH_LIMIT) {
+            this._flushConsoleData();
+            return;
+        }
+        if (!this._receiveFlushTimer) {
+            this._receiveFlushTimer = setTimeout(() => this._flushConsoleData(), RECEIVE_FLUSH_INTERVAL);
+        }
+    }
+
+    /**
+     * Emit all collected console bytes as one PERIPHERAL_RECIVE_DATA.
+     * @private
+     */
+    _flushConsoleData () {
+        if (this._receiveFlushTimer) {
+            clearTimeout(this._receiveFlushTimer);
+            this._receiveFlushTimer = null;
+        }
+        if (this._receiveChunks.length === 0) return;
+        const chunks = this._receiveChunks;
+        this._receiveChunks = [];
+        this._receiveChunkBytes = 0;
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA,
+            chunks.length === 1 ? chunks[0] : Buffer.concat(chunks));
     }
 
     /**
@@ -1440,8 +1508,9 @@ class MicroPythonBlePeripheral {
         const end = eol === 'noWarp' ? ", end=''" : '';
         const output = await this.execLive(`print(${pyStr(text)}${end})`);
         if (output !== null && output.length > 0) {
-            this._runtime.emit(this._runtime.constructor.PERIPHERAL_RECIVE_DATA,
-                Buffer.from(output, 'latin1'));
+            // Through the shared aggregation buffer, so earlier collected
+            // console bytes cannot be overtaken (console order preserved).
+            this._bufferConsoleData(Buffer.from(output, 'latin1'));
         }
     }
 
