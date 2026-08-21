@@ -164,9 +164,26 @@ const LIVE_READ_BATCH_LIMIT = 24;
  * program polling several sensors sequentially (await X, then await Y)
  * never has both reads pending at once, so without the ride-along each
  * axis would cost its own full round trip on a high-RTT link.
+ * The resident read pump lives on the same window: it keeps refreshing
+ * hot expressions in the background and stops by itself once none has
+ * been read for this long. While the pump covers an expression its
+ * cached value also stays servable for this long (instead of the plain
+ * read cache TTL): the refresh chain bounds the real staleness to about
+ * one round trip, and the window only acts as the dead-channel cutoff.
  * @readonly
  */
 const LIVE_READ_HOT_WINDOW = 2000;
+
+/**
+ * Rest between a settled read round trip and the next resident pump
+ * batch. One display frame: refreshing faster than the screen cannot be
+ * seen, and the pause keeps a near-zero-RTT transport (Web Serial) from
+ * saturating the line with back-to-back polls; on BLE the round trip
+ * time dominates and the pause is negligible. The serialized queue
+ * (at most one pump batch in flight) throttles everything else.
+ * @readonly
+ */
+const LIVE_READ_PUMP_INTERVAL = 16;
 
 /**
  * Separator between the values of one batched read reply: the ASCII
@@ -367,10 +384,21 @@ class MicroPythonBlePeripheral {
         /**
          * When each expression was last requested by a read block,
          * expression -> timestamp. Expressions read within
-         * LIVE_READ_HOT_WINDOW ride along in batched read commands.
+         * LIVE_READ_HOT_WINDOW ride along in batched read commands and
+         * are kept fresh by the resident read pump.
          * @type {object}
          */
         this._liveReadLastSeen = {};
+
+        /**
+         * Pending timer of the resident read pump (null = none). The
+         * pump re-arms itself after every settled live command and from
+         * every read request, and falls silent on its own when no hot
+         * expression is left, the channel is busy (upload/board-fs) or
+         * the connection is gone.
+         * @type {?object}
+         */
+        this._liveReadPumpTimer = null;
 
         /**
          * Live-session watchdog state: the sampling timer, since when the
@@ -479,6 +507,7 @@ class MicroPythonBlePeripheral {
      */
     reset () {
         this._stopLiveWatchdog();
+        this._stopLiveReadPump();
         // Hand the tail of the console stream to the GUI instead of
         // dropping it with the connection.
         this._flushConsoleData();
@@ -1118,10 +1147,14 @@ class MicroPythonBlePeripheral {
         // values are dispatched to the waiting blocks (their .then is
         // chained behind this one), so a held read batch departs while
         // the queue is idle and the blocks resuming right after find
-        // their next reads already on the wire.
+        // their next reads already on the wire. The pump re-arm keeps
+        // hot expressions refreshing even when no read is pending.
         return finished.then(result => {
             this._liveInFlight--;
-            if (this._liveInFlight === 0) this._flushLiveReads();
+            if (this._liveInFlight === 0) {
+                this._flushLiveReads();
+                this._scheduleLiveReadPump();
+            }
             return result;
         });
     }
@@ -1371,20 +1404,36 @@ class MicroPythonBlePeripheral {
 
     /**
      * Ask the board to print an expression and return the raw text.
-     * Readings are cached for a short moment and concurrent reads of the
-     * same expression share one REPL round-trip; distinct expressions
-     * arriving within the batch window are merged into one round trip.
+     * Readings are cached and concurrent reads of the same expression
+     * share one REPL round-trip; distinct expressions arriving within
+     * the batch window are merged into one round trip. Repeatedly read
+     * (hot) expressions are refreshed in the background by the resident
+     * pump, so their reads are answered from the cache without blocking:
+     * the pump bounds the real staleness to about one round trip, which
+     * is why a pump-covered value stays servable for the whole hot
+     * window instead of the plain cache TTL.
      * @param {string} expression - python expression to print.
      * @return {Promise<string>} - trimmed output, empty string as fallback.
      */
     readLiveString (expression) {
-        this._liveReadLastSeen[expression] = Date.now();
+        const now = Date.now();
+        const lastSeen = this._liveReadLastSeen[expression];
+        // Covered by the pump = already hot before this read and the
+        // channel is usable, so refreshes are actually flowing. During
+        // an upload or with the connection gone the strict TTL applies
+        // again and stale values die out right away.
+        const pumped = typeof lastSeen === 'number' &&
+            (now - lastSeen <= LIVE_READ_HOT_WINDOW) &&
+            this.isReady();
+        this._liveReadLastSeen[expression] = now;
+        this._scheduleLiveReadPump();
         const cached = this._liveReadCache[expression];
         if (cached) {
-            // A still-fresh value wins over an in-flight refresh: a
-            // ride-along entry carries both, and blocks should not stall
-            // a full round trip while a good value is at hand.
-            if (typeof cached.time === 'number' && Date.now() - cached.time < LIVE_READ_CACHE_TTL) {
+            // A still-servable value wins over an in-flight refresh:
+            // blocks should not stall a full round trip while a good
+            // value is at hand (ride-along entries carry both).
+            const ttl = pumped ? LIVE_READ_HOT_WINDOW : LIVE_READ_CACHE_TTL;
+            if (typeof cached.time === 'number' && now - cached.time < ttl) {
                 return Promise.resolve(cached.value);
             }
             if (cached.promise) return cached.promise;
@@ -1454,7 +1503,19 @@ class MicroPythonBlePeripheral {
             return;
         }
         this._pendingLiveReads = [];
-        const riders = this._collectHotRiders(batch);
+        this._dispatchLiveReads(batch, this._collectHotRiders(batch));
+    }
+
+    /**
+     * Send one batched read command (pending read entries plus riding
+     * hot expressions) to the board and dispatch the answered values.
+     * @param {Array.<object>} batch - pending read entries, may be empty
+     *   for a pure pump refresh.
+     * @param {Array.<object>} riders - rider objects from
+     *   _collectHotRiders.
+     * @private
+     */
+    _dispatchLiveReads (batch, riders) {
         const finish = values => {
             batch.forEach((entry, index) => {
                 const value = values && index < values.length ? values[index] : '';
@@ -1467,6 +1528,7 @@ class MicroPythonBlePeripheral {
         };
         const expressions = batch.map(entry => entry.expression)
             .concat(riders.map(rider => rider.expression));
+        if (expressions.length === 0) return;
         const command = expressions.length === 1 ?
             `print(${expressions[0]})` :
             MicroPythonBlePeripheral.buildLiveReadBatchCommand(expressions);
@@ -1482,6 +1544,65 @@ class MicroPythonBlePeripheral {
             const parts = String(output).split(LIVE_READ_SEPARATOR);
             finish(parts.length === expressions.length ? parts.map(part => part.trim()) : null);
         });
+    }
+
+    /**
+     * Arm the resident read pump unless it is already pending. The pump
+     * runs one display frame later: long enough to keep a fast transport
+     * from busy-polling, short enough to be invisible next to any real
+     * round trip time.
+     * @private
+     */
+    _scheduleLiveReadPump () {
+        if (this._liveReadPumpTimer) return;
+        this._liveReadPumpTimer = setTimeout(() => {
+            this._liveReadPumpTimer = null;
+            this._pumpLiveReads();
+        }, LIVE_READ_PUMP_INTERVAL);
+        // Do not keep a node.js test process alive; no-op in browsers.
+        if (this._liveReadPumpTimer && typeof this._liveReadPumpTimer.unref === 'function') {
+            this._liveReadPumpTimer.unref();
+        }
+    }
+
+    /**
+     * Stop a pending resident pump run (connection reset).
+     * @private
+     */
+    _stopLiveReadPump () {
+        if (this._liveReadPumpTimer) {
+            clearTimeout(this._liveReadPumpTimer);
+            this._liveReadPumpTimer = null;
+        }
+    }
+
+    /**
+     * One resident pump beat: while blocks keep reading, hot expressions
+     * are refreshed with back-to-back batched reads (at most one in
+     * flight ever, the live queue stays drained), so readLiveString is
+     * answered from the cache and block execution never stalls on the
+     * link RTT. The pump yields to everything else on the channel: a
+     * command in flight re-arms the pump through its settle hook, an
+     * upload / board-fs exchange / lost connection pauses it (the next
+     * read request re-arms it), and it falls silent once no expression
+     * has been read for the hot window.
+     * @private
+     */
+    _pumpLiveReads () {
+        if (this._liveInFlight > 0) return;
+        if (this._pendingLiveReads.length > 0) {
+            // Real reads are waiting and the queue is idle: depart now,
+            // the window timer only exists for same-tick coalescing.
+            this._flushLiveReads();
+            return;
+        }
+        // _replCaptureDepth guards the raw channel during board-fs
+        // exchanges and the live-mode handshake, which do not run
+        // through the live queue.
+        if (!this.isReady() || this._replCaptureDepth > 0) return;
+        const riders = this._collectHotRiders([]);
+        if (riders.length === 0) return;
+        this._dispatchLiveReads([], riders);
     }
 
     /**

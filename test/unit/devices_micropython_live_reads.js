@@ -251,35 +251,45 @@ test('reads arriving while a command is in flight merge into the next batch', as
     t.end();
 });
 
-test('hot expressions ride along and refresh the cache', async t => {
+test('the resident pump refreshes hot expressions and reads answer from the cache', async t => {
     const values = {'adc4.read()': '100', 'adc5.read()': '200'};
-    const {peripheral, commands} = makeReadPeripheral(values);
+    const {peripheral, commands, release, heldCount} = makeReadPeripheral(values, {manual: true});
+    const releaseNext = async () => {
+        while (heldCount() === 0) await wait(2);
+        release();
+    };
 
-    const [x1, y1] = await Promise.all([
+    const warmup = Promise.all([
         peripheral.readLiveString('adc4.read()'),
         peripheral.readLiveString('adc5.read()')
     ]);
+    await releaseNext();
+    const [x1, y1] = await warmup;
     t.equal(x1, '100', 'first axis read');
     t.equal(y1, '200', 'second axis read');
     t.equal(commands.length, 1, 'warmup merged into one round trip');
 
-    await wait(60);
+    // The board values change; the next pump beat picks them up without
+    // any block asking for them.
     values['adc4.read()'] = '101';
     values['adc5.read()'] = '201';
+    await releaseNext();
+    t.equal(commands.length, 2, 'pump sent one background refresh');
+    t.ok(commands[1].startsWith('_r=[]'), 'pump refresh is one batched command');
+    t.ok(commands[1].includes('adc4.read()') && commands[1].includes('adc5.read()'),
+        'pump refreshes both hot expressions in one round trip');
+    // Let the released reply settle into the cache.
+    await wait(2);
 
     const x2 = await peripheral.readLiveString('adc4.read()');
-    t.equal(x2, '101', 'expired read went to the board');
-    t.equal(commands.length, 2, 'one more round trip');
-    t.ok(commands[1].startsWith('_r=[]'), 'ride-along made it a batched command');
-    t.ok(commands[1].includes('adc5.read()'), 'hot expression rode along');
-
     const y2 = await peripheral.readLiveString('adc5.read()');
-    t.equal(y2, '201', 'ride-along value served from the cache');
-    t.equal(commands.length, 2, 'second axis cost no extra round trip');
+    t.equal(x2, '101', 'read answered the pumped value from the cache');
+    t.equal(y2, '201', 'read answered the pumped value from the cache');
+    t.equal(commands.length, 2, 'cache hits cost no extra round trip');
     t.end();
 });
 
-test('ride-alongs respect the batch expression limit', async t => {
+test('pump batches respect the batch expression limit', async t => {
     const values = {};
     const names = [];
     for (let i = 0; i < 30; i++) {
@@ -287,18 +297,24 @@ test('ride-alongs respect the batch expression limit', async t => {
         names.push(expression);
         values[expression] = String(i);
     }
-    const {peripheral, commands} = makeReadPeripheral(values);
+    const {peripheral, commands, release, heldCount} = makeReadPeripheral(values, {manual: true});
+    const releaseNext = async () => {
+        while (heldCount() === 0) await wait(2);
+        release();
+    };
 
-    await Promise.all(names.map(expression => peripheral.readLiveString(expression)));
-    await wait(60);
-    commands.length = 0;
+    const warmup = Promise.all(names.map(expression => peripheral.readLiveString(expression)));
+    await releaseNext();
+    await releaseNext();
+    const settled = await warmup;
+    t.same(settled, names.map((expression, i) => String(i)),
+        'thirty cold reads all answered');
+    t.equal(commands.length, 2, 'thirty cold reads took two batches');
 
-    const value = await peripheral.readLiveString('adc0.read()');
-    t.equal(value, '0', 'requested read answered');
-    t.equal(commands.length, 1, 'one round trip');
-    t.equal((commands[0].match(/lambda:/g) || []).length, 24,
-        'ride-alongs fill the batch only up to the limit');
-    t.ok(commands[0].includes('adc0.read()'), 'the real read is aboard');
+    await releaseNext();
+    t.equal(commands.length, 3, 'pump refresh departed');
+    t.equal((commands[2].match(/lambda:/g) || []).length, 24,
+        'pump batch capped at the expression limit');
     t.end();
 });
 
@@ -342,38 +358,166 @@ test('a state-changing command invalidates in-flight ride-along values', async t
 });
 
 test('a lone hot expression keeps the plain print fast path', async t => {
-    const {peripheral, commands} = makeReadPeripheral({'adc4.read()': '7'});
+    const {peripheral, commands, release, heldCount} = makeReadPeripheral(
+        {'adc4.read()': '7'}, {manual: true}
+    );
+    const releaseNext = async () => {
+        while (heldCount() === 0) await wait(2);
+        release();
+    };
 
-    const v1 = await peripheral.readLiveString('adc4.read()');
-    await wait(60);
-    const v2 = await peripheral.readLiveString('adc4.read()');
-    t.equal(v1, '7', 'first read answered');
-    t.equal(v2, '7', 'second read answered');
+    const first = peripheral.readLiveString('adc4.read()');
+    await releaseNext();
+    t.equal(await first, '7', 'first read answered');
+
+    await releaseNext();
+    t.equal(commands.length, 2, 'pump refreshed the lone expression');
     t.same(commands, ['print(adc4.read())', 'print(adc4.read())'],
         'a single expression with nothing to ride along never batches');
     t.end();
 });
 
-test('sequential two-axis polling costs about one round trip per iteration at high RTT', async t => {
+test('sequential two-axis polling runs at frame rate, not at RTT rate', async t => {
     const {peripheral, commands} = makeReadPeripheral({
         'adc4.read()': '1872',
         'adc5.read()': '1904'
     }, {latency: 100});
 
+    // Cold start: the very first read of each axis pays a round trip.
+    const x0 = await peripheral.readLiveString('adc4.read()');
+    const y0 = await peripheral.readLiveString('adc5.read()');
+    t.equal(x0, '1872', 'first axis cold read answered');
+    t.equal(y0, '1904', 'second axis cold read answered');
+
+    // Warm loop: every read hits the pumped cache and never waits for
+    // the 100ms RTT, so the loop runs at its own frame gap.
     const iterations = 6;
+    const start = Date.now();
     for (let i = 0; i < iterations; i++) {
         const x = await peripheral.readLiveString('adc4.read()');
         const y = await peripheral.readLiveString('adc5.read()');
         t.equal(x, '1872', `iteration ${i} first axis answered`);
         t.equal(y, '1904', `iteration ${i} second axis answered`);
-        // Frame gap; also lets the read cache expire like a real loop.
         await wait(60);
     }
-    // The first iteration pays two round trips (nothing is hot yet),
-    // every following one shares a single round trip between both axes
-    // thanks to the ride-along refresh. The old to-the-window flush cost
-    // two round trips per iteration on a high-RTT link.
-    t.equal(commands.length, iterations + 1,
-        `${commands.length} round trips for ${iterations} two-axis iterations`);
+    const elapsed = Date.now() - start;
+    // 6 iterations x 60ms frame gap plus scheduling noise; the pre-pump
+    // behavior serialized about one full RTT per iteration on top of
+    // the frame gap (>=960ms).
+    t.ok(elapsed < 700, `two-axis loop took ${elapsed}ms, not RTT-bound`);
+    // Round trips track the pump rate (roughly elapsed / RTT), fully
+    // decoupled from the iteration count.
+    t.ok(commands.length <= Math.ceil(elapsed / 100) + 3,
+        `${commands.length} round trips track the link rate`);
+    const pumped = commands.slice(2);
+    t.ok(pumped.length > 0, 'pump kept refreshing in the background');
+    t.ok(pumped.every(command =>
+        command.includes('adc4.read()') && command.includes('adc5.read()')),
+    'every pump batch refreshes both axes in one round trip');
+    t.end();
+});
+
+test('reads served from the pumped cache answer within 5ms', async t => {
+    const {peripheral, commands} = makeReadPeripheral({
+        'adc4.read()': '1872',
+        'adc5.read()': '1904'
+    }, {latency: 100});
+
+    await peripheral.readLiveString('adc4.read()');
+    await peripheral.readLiveString('adc5.read()');
+    const countBefore = commands.length;
+
+    const start = Date.now();
+    const x = await peripheral.readLiveString('adc4.read()');
+    const y = await peripheral.readLiveString('adc5.read()');
+    const elapsed = Date.now() - start;
+    t.equal(x, '1872', 'first axis answered');
+    t.equal(y, '1904', 'second axis answered');
+    t.ok(elapsed <= 5, `cache-hit reads answered in ${elapsed}ms`);
+    t.equal(commands.length, countBefore, 'the reads issued no round trip');
+    t.end();
+});
+
+test('the pump keeps at most one command in flight and no backlog builds up', async t => {
+    const {peripheral, commands} = makeReadPeripheral({
+        'adc4.read()': '1872',
+        'adc5.read()': '1904'
+    }, {latency: 20});
+    let maxInFlight = 0;
+    const baseWrite = peripheral._writeRaw;
+    peripheral._writeRaw = buffer => {
+        maxInFlight = Math.max(maxInFlight, peripheral._liveInFlight);
+        return baseWrite(buffer);
+    };
+
+    // A scaled-down soak: blocks keep polling both axes while the pump
+    // refreshes them in the background.
+    const deadline = Date.now() + 400;
+    while (Date.now() < deadline) {
+        await peripheral.readLiveString('adc4.read()');
+        await peripheral.readLiveString('adc5.read()');
+        await wait(10);
+    }
+    t.equal(maxInFlight, 1, 'never more than one live command in flight');
+    t.equal(peripheral._pendingLiveReads.length, 0, 'no pending read backlog');
+    t.ok(commands.length <= Math.ceil(400 / 20) + 4,
+        `round trips bounded by the link rate (${commands.length})`);
+    t.equal(Object.keys(peripheral._liveReadCache).length, 2,
+        'cache stays bounded to the hot expressions');
+    t.equal(Object.keys(peripheral._liveReadLastSeen).length, 2,
+        'hot table stays bounded');
+    t.end();
+});
+
+test('the pump falls silent once no expression was read for the hot window', async t => {
+    const {peripheral, commands} = makeReadPeripheral({'adc4.read()': '7'});
+
+    await peripheral.readLiveString('adc4.read()');
+    // Age the hot table instead of sleeping through the real window.
+    peripheral._liveReadLastSeen['adc4.read()'] -= 3000;
+    await wait(50);
+    const settled = commands.length;
+    await wait(50);
+    t.equal(commands.length, settled, 'no further pump batches');
+    t.notOk(peripheral._liveReadPumpTimer, 'pump timer gone');
+    t.same(peripheral._liveReadLastSeen, {}, 'stale hot entry cleaned up');
+    t.end();
+});
+
+test('the pump pauses during an upload and resumes afterwards', async t => {
+    const values = {'adc4.read()': '7'};
+    const {peripheral, commands} = makeReadPeripheral(values, {latency: 5});
+
+    await peripheral.readLiveString('adc4.read()');
+    await wait(60);
+    t.ok(commands.length >= 2, 'pump running before the upload');
+
+    peripheral._uploading = true;
+    await wait(40);
+    const during = commands.length;
+    await wait(60);
+    t.equal(commands.length, during, 'pump paused while uploading');
+
+    peripheral._uploading = false;
+    const value = await peripheral.readLiveString('adc4.read()');
+    t.equal(value, '7', 'read after the upload answered');
+    await wait(60);
+    t.ok(commands.length > during, 'pump resumed after the upload');
+    t.end();
+});
+
+test('reset stops the pump and clears the hot table', async t => {
+    const {peripheral, commands} = makeReadPeripheral({'adc4.read()': '7'}, {latency: 5});
+
+    await peripheral.readLiveString('adc4.read()');
+    await wait(40);
+    t.ok(commands.length >= 1, 'pump ran while connected');
+
+    peripheral.reset();
+    const after = commands.length;
+    await wait(60);
+    t.equal(commands.length, after, 'no pump batches after reset');
+    t.notOk(peripheral._liveReadPumpTimer, 'pump timer cleared');
+    t.same(peripheral._liveReadLastSeen, {}, 'hot table cleared');
     t.end();
 });
