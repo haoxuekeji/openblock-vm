@@ -158,6 +158,17 @@ const LIVE_READ_BATCH_WINDOW = 10;
 const LIVE_READ_BATCH_LIMIT = 24;
 
 /**
+ * How long an expression stays "hot" after its last read request. Hot
+ * expressions ride along in every batched read round trip even when no
+ * block is waiting for them right now, keeping their cache fresh: a
+ * program polling several sensors sequentially (await X, then await Y)
+ * never has both reads pending at once, so without the ride-along each
+ * axis would cost its own full round trip on a high-RTT link.
+ * @readonly
+ */
+const LIVE_READ_HOT_WINDOW = 2000;
+
+/**
  * Separator between the values of one batched read reply: the ASCII
  * record separator, which can not appear in sensor readings.
  * @readonly
@@ -321,6 +332,16 @@ class MicroPythonBlePeripheral {
         this._liveQueue = Promise.resolve();
 
         /**
+         * How many live commands are queued or on the wire right now.
+         * While this is nonzero an expired read batch window holds its
+         * batch back instead of flushing: on a high-RTT link every read
+         * arriving during the in-flight round trip then merges into one
+         * command, so the merge degree scales with the RTT by itself.
+         * @type {number}
+         */
+        this._liveInFlight = 0;
+
+        /**
          * Pin numbers already initialized on the board during this live
          * session, mapped to their current mode string.
          * @type {object}
@@ -336,10 +357,20 @@ class MicroPythonBlePeripheral {
 
         /**
          * Short lived cache of sensor readings, expression -> entry with
-         * either an in-flight promise or {value, time}.
+         * an in-flight promise, a {value, time} pair, or both (a
+         * ride-along refresh keeps the previous still-fresh value
+         * readable while the new one is on the wire).
          * @type {object}
          */
         this._liveReadCache = {};
+
+        /**
+         * When each expression was last requested by a read block,
+         * expression -> timestamp. Expressions read within
+         * LIVE_READ_HOT_WINDOW ride along in batched read commands.
+         * @type {object}
+         */
+        this._liveReadLastSeen = {};
 
         /**
          * Live-session watchdog state: the sampling timer, since when the
@@ -478,6 +509,9 @@ class MicroPythonBlePeripheral {
         this._livePins = {};
         this._liveObjects = new Set();
         this._liveReadCache = {};
+        // Board-side objects are gone after a reboot/session rebuild;
+        // stale hot expressions would only ride along into NameErrors.
+        this._liveReadLastSeen = {};
     }
 
     /**
@@ -1030,7 +1064,8 @@ class MicroPythonBlePeripheral {
             // cached sensor reading could be stale afterwards.
             this._liveReadCache = {};
         }
-        return this._enqueueLive(async () => {
+        this._liveInFlight++;
+        const finished = this._enqueueLive(async () => {
             if (!this.isReady()) {
                 this._reportLiveUnavailable();
                 return null;
@@ -1078,6 +1113,16 @@ class MicroPythonBlePeripheral {
                     throw retryErr;
                 }
             }
+        });
+        // _enqueueLive never rejects. Settling runs before the batch
+        // values are dispatched to the waiting blocks (their .then is
+        // chained behind this one), so a held read batch departs while
+        // the queue is idle and the blocks resuming right after find
+        // their next reads already on the wire.
+        return finished.then(result => {
+            this._liveInFlight--;
+            if (this._liveInFlight === 0) this._flushLiveReads();
+            return result;
         });
     }
 
@@ -1333,12 +1378,16 @@ class MicroPythonBlePeripheral {
      * @return {Promise<string>} - trimmed output, empty string as fallback.
      */
     readLiveString (expression) {
+        this._liveReadLastSeen[expression] = Date.now();
         const cached = this._liveReadCache[expression];
         if (cached) {
-            if (cached.promise) return cached.promise;
-            if (Date.now() - cached.time < LIVE_READ_CACHE_TTL) {
+            // A still-fresh value wins over an in-flight refresh: a
+            // ride-along entry carries both, and blocks should not stall
+            // a full round trip while a good value is at hand.
+            if (typeof cached.time === 'number' && Date.now() - cached.time < LIVE_READ_CACHE_TTL) {
                 return Promise.resolve(cached.value);
             }
+            if (cached.promise) return cached.promise;
         }
         const promise = this._readLiveExpression(expression).then(value => {
             // Only publish if the cache was not invalidated meanwhile.
@@ -1381,9 +1430,15 @@ class MicroPythonBlePeripheral {
 
     /**
      * Send the collected read expressions to the board as one command
-     * and dispatch the answered values back to the waiting blocks. A
-     * failed batch (channel down, protocol error, unparseable reply)
-     * degrades to empty strings, exactly like a failed single read.
+     * and dispatch the answered values back to the waiting blocks. The
+     * batch only departs while the live queue is idle: with a command
+     * already on the wire (high-RTT links keep one there most of the
+     * time) it keeps collecting and the settle hook in execLive flushes
+     * it the moment the queue drains, so every read arriving within one
+     * round trip shares the next one. Hot expressions ride along to keep
+     * their cache fresh. A failed batch (channel down, protocol error,
+     * unparseable reply) degrades to empty strings, exactly like a
+     * failed single read.
      * @private
      */
     _flushLiveReads () {
@@ -1393,28 +1448,88 @@ class MicroPythonBlePeripheral {
         }
         const batch = this._pendingLiveReads;
         if (batch.length === 0) return;
+        if (this._liveInFlight > 0 && batch.length < LIVE_READ_BATCH_LIMIT) {
+            // Hold the batch back; only a full one departs early so the
+            // command size stays bounded.
+            return;
+        }
         this._pendingLiveReads = [];
+        const riders = this._collectHotRiders(batch);
         const finish = values => {
             batch.forEach((entry, index) => {
                 const value = values && index < values.length ? values[index] : '';
                 entry.resolvers.forEach(resolve => resolve(value));
             });
+            riders.forEach((rider, index) => {
+                const valueIndex = batch.length + index;
+                rider.settle(values && valueIndex < values.length ? values[valueIndex] : '');
+            });
         };
-        const command = batch.length === 1 ?
-            `print(${batch[0].expression})` :
-            MicroPythonBlePeripheral.buildLiveReadBatchCommand(batch.map(entry => entry.expression));
+        const expressions = batch.map(entry => entry.expression)
+            .concat(riders.map(rider => rider.expression));
+        const command = expressions.length === 1 ?
+            `print(${expressions[0]})` :
+            MicroPythonBlePeripheral.buildLiveReadBatchCommand(expressions);
         this.execLive(command, REPL_RESPONSE_TIMEOUT, {isReadOnly: true}).then(output => {
             if (output === null) {
                 finish(null);
                 return;
             }
-            if (batch.length === 1) {
+            if (expressions.length === 1) {
                 finish([String(output).trim()]);
                 return;
             }
             const parts = String(output).split(LIVE_READ_SEPARATOR);
-            finish(parts.length === batch.length ? parts.map(part => part.trim()) : null);
+            finish(parts.length === expressions.length ? parts.map(part => part.trim()) : null);
         });
+    }
+
+    /**
+     * Pick the hot expressions (recently read, not already in the
+     * departing batch, not already on the wire) that ride along in this
+     * batched read command, and publish an in-flight cache entry for
+     * each so concurrent reads share the round trip instead of queueing
+     * their own. A rider entry keeps a still-fresh previous value
+     * readable while the refresh is on the wire. settle(value) resolves
+     * the entry; the cache write is skipped when the entry was
+     * invalidated meanwhile (a state-changing command cleared the
+     * cache), so a stale ride-along value never survives a write.
+     * @param {Array.<object>} batch - the pending read entries departing.
+     * @return {Array.<{expression: string, settle: Function}>} - riders.
+     * @private
+     */
+    _collectHotRiders (batch) {
+        const riders = [];
+        const now = Date.now();
+        const inBatch = new Set(batch.map(entry => entry.expression));
+        for (const expression of Object.keys(this._liveReadLastSeen)) {
+            if (batch.length + riders.length >= LIVE_READ_BATCH_LIMIT) break;
+            if (now - this._liveReadLastSeen[expression] > LIVE_READ_HOT_WINDOW) {
+                delete this._liveReadLastSeen[expression];
+                continue;
+            }
+            if (inBatch.has(expression)) continue;
+            const cached = this._liveReadCache[expression];
+            if (cached && cached.promise) continue;
+            let resolveRider;
+            const promise = new Promise(resolve => {
+                resolveRider = resolve;
+            });
+            this._liveReadCache[expression] = cached ?
+                {promise, value: cached.value, time: cached.time} :
+                {promise};
+            riders.push({
+                expression,
+                settle: value => {
+                    const entry = this._liveReadCache[expression];
+                    if (entry && entry.promise === promise) {
+                        this._liveReadCache[expression] = {value, time: Date.now()};
+                    }
+                    resolveRider(value);
+                }
+            });
+        }
+        return riders;
     }
 
     /**
