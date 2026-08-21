@@ -70,7 +70,9 @@ class MicroPythonMultiTransportPeripheral {
                 this._deviceId,
                 this._originalDeviceId,
                 this._pnpidList,
-                noRegister
+                // deviceOpt (chip/flashAddress/webFirmware) enables the
+                // browser-side esptool-js firmware flashing on this channel.
+                {register: false, deviceOpt: this._deviceOpt}
             );
             break;
         case TRANSPORT_WEB_BLE:

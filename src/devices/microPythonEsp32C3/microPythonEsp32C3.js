@@ -24,7 +24,10 @@ const DIVECE_OPT = {
     type: 'microPython',
     chip: 'esp32c3',
     firmwarePrefix: 'esp32c3-ble-openblock',
-    flashAddress: '0x0'
+    flashAddress: '0x0',
+    // Firmware image served by the GUI, flashed in the browser through
+    // esptool-js when the board is connected over Web Serial.
+    webFirmware: 'static/firmwares/esp32c3-ble-openblock.bin'
 };
 
 /**

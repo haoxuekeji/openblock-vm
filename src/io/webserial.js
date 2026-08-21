@@ -29,6 +29,22 @@ class WebSerial {
         this._writer = null;
         this._connected = false;
 
+        /**
+         * Whether the underlying SerialPort is currently lent out to an
+         * external protocol driver (e.g. esptool-js flashing firmware).
+         * While lent, the read loop is stopped, writes are dropped and the
+         * port is closed so the borrower can (re)open it itself.
+         * @type {boolean}
+         */
+        this._lent = false;
+
+        /**
+         * Promise of the running read loop, awaited on lend so the reader
+         * lock is guaranteed released before the port is handed over.
+         * @type {?Promise}
+         */
+        this._readLoopPromise = null;
+
         this._handleHardwareDisconnect = this._handleHardwareDisconnect.bind(this);
     }
 
@@ -81,7 +97,7 @@ class WebSerial {
                 this._writer = this._port.writable.getWriter();
                 this._connected = true;
                 navigator.serial.addEventListener('disconnect', this._handleHardwareDisconnect);
-                this._readLoop();
+                this._readLoopPromise = this._readLoop();
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
                 if (this._connectCallback) this._connectCallback();
             })
@@ -95,7 +111,7 @@ class WebSerial {
      * @private
      */
     async _readLoop () {
-        while (this._connected && this._port && this._port.readable) {
+        while (this._connected && !this._lent && this._port && this._port.readable) {
             this._reader = this._port.readable.getReader();
             try {
                 for (;;) {
@@ -125,8 +141,66 @@ class WebSerial {
      * @return {Promise} - resolved when the bytes were handed to the OS.
      */
     write (data) {
-        if (!this._connected || !this._writer) return Promise.resolve();
+        if (!this._connected || this._lent || !this._writer) return Promise.resolve();
         return this._writer.write(data);
+    }
+
+    /**
+     * Hand the closed SerialPort over to an external protocol driver
+     * (esptool-js opens and drives the port itself). The read loop is
+     * stopped and all locks are released first; the logical connection
+     * state stays "connected" so the GUI does not flicker.
+     * @return {Promise<SerialPort>} - the closed port, ready to be opened.
+     */
+    async lendPort () {
+        if (!this._connected || !this._port) {
+            throw new Error('No serial port to lend');
+        }
+        if (this._lent) {
+            throw new Error('The serial port is already lent out');
+        }
+        this._lent = true;
+        if (this._reader) {
+            await this._reader.cancel().catch(() => null);
+        }
+        if (this._readLoopPromise) {
+            // The loop sees _lent and exits after releasing the reader lock.
+            await this._readLoopPromise.catch(() => null);
+            this._readLoopPromise = null;
+        }
+        if (this._writer) {
+            try {
+                this._writer.releaseLock();
+            } catch (e) {
+                // Lock already released.
+            }
+            this._writer = null;
+        }
+        await this._port.close();
+        return this._port;
+    }
+
+    /**
+     * Take the port back after lendPort: reopen it at the configured baud
+     * rate and restart the read loop. Tolerates a borrower that left the
+     * port open (close + reopen once).
+     * @return {Promise} - resolved when the port is usable again.
+     */
+    async reclaimPort () {
+        if (!this._lent) return;
+        this._lent = false;
+        if (!this._port || !this._connected) {
+            throw new Error('The serial port was lost while lent out');
+        }
+        const openOptions = {baudRate: this._options.baudRate || 115200};
+        try {
+            await this._port.open(openOptions);
+        } catch (e) {
+            await this._port.close().catch(() => null);
+            await this._port.open(openOptions);
+        }
+        this._writer = this._port.writable.getWriter();
+        this._readLoopPromise = this._readLoop();
     }
 
     /**
@@ -135,7 +209,7 @@ class WebSerial {
      * @return {Promise} - resolved when the reset pulse is done.
      */
     async hardReset () {
-        if (!this._connected || !this._port || !this._port.setSignals) return;
+        if (!this._connected || this._lent || !this._port || !this._port.setSignals) return;
         try {
             await this._port.setSignals({dataTerminalReady: false, requestToSend: true});
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -151,6 +225,7 @@ class WebSerial {
     disconnect () {
         const wasConnected = this._connected;
         this._connected = false;
+        this._lent = false;
         navigator.serial.removeEventListener('disconnect', this._handleHardwareDisconnect);
 
         const cleanup = [];

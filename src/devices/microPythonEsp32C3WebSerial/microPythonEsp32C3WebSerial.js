@@ -23,9 +23,11 @@ class OpenBlockMicroPythonEsp32C3WebSerialDevice extends OpenBlockMicroPythonEsp
         super(runtime, originalDeviceId);
 
         // Replace the serialport peripheral registered by the parent
-        // constructor with the Web Serial peripheral.
+        // constructor with the Web Serial peripheral. deviceOpt enables
+        // the browser-side esptool-js firmware flashing.
         this._peripheral = new MicroPythonWebSerialPeripheral(
-            runtime, this.DEVICE_ID, originalDeviceId, this.PNPID_LIST);
+            runtime, this.DEVICE_ID, originalDeviceId, this.PNPID_LIST,
+            {deviceOpt: this.DIVECE_OPT});
     }
 }
 
