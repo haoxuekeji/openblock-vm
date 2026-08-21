@@ -68,6 +68,11 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
         this._deviceOpt = options.deviceOpt || null;
         // Overridable so tests do not wait out the real boot time.
         this._firmwareBootMs = FIRMWARE_BOOT_TIME;
+        // The board push sampler exists to beat the BLE round trip
+        // time; serial polling is already at the display rate with a
+        // near-zero RTT, so the resident pump stays the refresh path
+        // and the frame extractor never touches the serial stream.
+        this._livePushEnabled = false;
     }
 
     /**

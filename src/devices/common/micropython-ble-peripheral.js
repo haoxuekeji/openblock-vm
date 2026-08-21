@@ -126,9 +126,12 @@ const RAW_REPL_MAX_COMMAND = 256;
 
 /**
  * Python statements executed once when entering realtime (live) mode.
+ * The generation reset kills a push sampler thread left over from a
+ * previous live session (its loop exits once the generation no longer
+ * matches), at zero extra round trips.
  * @readonly
  */
-const LIVE_PROLOGUE = 'from machine import Pin, PWM, DAC, ADC, TouchPad\nimport time';
+const LIVE_PROLOGUE = 'from machine import Pin, PWM, DAC, ADC, TouchPad\nimport time\n_ob_push_g=-1';
 
 /**
  * How long one live sensor reading stays valid. Blocks polling the same
@@ -191,6 +194,71 @@ const LIVE_READ_PUMP_INTERVAL = 16;
  * @readonly
  */
 const LIVE_READ_SEPARATOR = '\x1e';
+
+/**
+ * Board-side sampling period of the live push sampler in ms. The
+ * sampler is a background thread injected through the raw REPL: it
+ * evaluates the hot expressions at this rate and notifies one frame per
+ * pass, so readings refresh at the sampling rate instead of the polling
+ * round trip rate (the whole point of BLE-E). 25ms rounds to 30-40ms
+ * on the 100Hz FreeRTOS tick, i.e. ~30Hz frames, about one per BLE
+ * connection event at the negotiated 22-30ms interval.
+ * @readonly
+ */
+const LIVE_PUSH_INTERVAL = 25;
+
+/**
+ * No valid frame for this long while the sampler should be running
+ * means it is dead (killed by a session rebuild, thread crashed, or a
+ * firmware without _thread never started it): fall back to the
+ * resident read pump.
+ * @readonly
+ */
+const LIVE_PUSH_STALL_TIMEOUT = 1000;
+
+/**
+ * Failed sampler starts/stalls per live session before push is given
+ * up and the resident pump serves the whole session.
+ * @readonly
+ */
+const LIVE_PUSH_MAX_FAILURES = 2;
+
+/**
+ * How long after a state-changing command settles that push frames are
+ * still ignored: a frame emitted right after the write's reply may
+ * have been sampled just before the write executed (the sampler thread
+ * can be preempted mid-pass), and a pre-write value must never survive
+ * a write. Slightly above one sampling period, so at most one frame is
+ * sacrificed.
+ * @readonly
+ */
+const LIVE_PUSH_WRITE_MUTE = 40;
+
+/**
+ * Frame markers of the push sampler: ASCII file/group separators,
+ * which never occur in REPL protocol traffic or sensor readings.
+ * A frame is FS 'P' <generation> ';' <values joined by \x1e> GS,
+ * interleaved anywhere in the notification stream.
+ * @readonly
+ */
+const LIVE_PUSH_FRAME_START = '\x1c';
+const LIVE_PUSH_FRAME_END = '\x1d';
+
+/**
+ * A partial frame longer than this cannot be a real frame (the board
+ * caps emitted frames at 512 bytes): the withheld bytes are released
+ * back into the normal stream, bounding the damage of a stray frame
+ * start byte in user program output.
+ * @readonly
+ */
+const LIVE_PUSH_MAX_FRAME = 1024;
+
+/**
+ * Marker printed by a successfully started push sampler; its absence
+ * in the command output means the board could not start it.
+ * @readonly
+ */
+const LIVE_PUSH_ACK = 'OBPUSH1';
 
 /**
  * How long incoming console bytes are collected before one
@@ -401,6 +469,41 @@ class MicroPythonBlePeripheral {
         this._liveReadPumpTimer = null;
 
         /**
+         * Board push sampler state (BLE-E). A background thread injected
+         * through the raw REPL samples the hot expressions at a fixed
+         * rate and notifies value frames; the vm feeds them into the
+         * read cache, so readLiveString answers at the sampling rate
+         * instead of the polling round trip rate. The resident pump is
+         * the automatic fallback whenever push is off, failed or
+         * unsupported. Transports where polling is already free (Web
+         * Serial) disable it wholesale via _livePushEnabled.
+         * gen is bumped on every (re)start, stop and session reset so
+         * stale frames can never match; lastFrame tracks sampler
+         * liveness; muteUntil/writesInFlight implement the post-write
+         * frame grace (a frame may have been sampled before the write
+         * executed and must not survive it); carry holds a partial
+         * frame split across notification packets.
+         * @type {boolean} / @type {boolean} / @type {boolean} /
+         * @type {Array.<string>} / @type {number} / @type {number} /
+         * @type {number} / @type {boolean} / @type {number} /
+         * @type {number} / @type {string}
+         */
+        this._livePushEnabled = true;
+        this._livePushActive = false;
+        this._livePushStarting = false;
+        this._livePushExprs = [];
+        this._livePushGen = 0;
+        this._livePushLastFrame = 0;
+        this._livePushFailures = 0;
+        this._livePushUnsupported = false;
+        this._livePushMuteUntil = 0;
+        this._liveWritesInFlight = 0;
+        this._livePushCarry = '';
+        // Instance copies so tests can shrink the timing.
+        this._livePushStallMs = LIVE_PUSH_STALL_TIMEOUT;
+        this._livePushWriteMuteMs = LIVE_PUSH_WRITE_MUTE;
+
+        /**
          * Live-session watchdog state: the sampling timer, since when the
          * session has been observed stalled (null = not stalled), and
          * whether a watchdog-triggered recovery is still pending in the
@@ -541,6 +644,21 @@ class MicroPythonBlePeripheral {
         // Board-side objects are gone after a reboot/session rebuild;
         // stale hot expressions would only ride along into NameErrors.
         this._liveReadLastSeen = {};
+        // The push sampler belongs to the session: forget it and bump
+        // the generation so frames from a not-yet-dead old sampler are
+        // dropped. Support is re-probed per session (the next session
+        // may run on different firmware after a reflash).
+        this._livePushActive = false;
+        this._livePushStarting = false;
+        this._livePushExprs = [];
+        this._livePushGen++;
+        this._livePushLastFrame = 0;
+        this._livePushFailures = 0;
+        this._livePushUnsupported = false;
+        this._livePushMuteUntil = 0;
+        this._livePushCarry = '';
+        // _liveWritesInFlight is intentionally kept: it mirrors
+        // unsettled promises which will still settle and decrement.
     }
 
     /**
@@ -670,13 +788,104 @@ class MicroPythonBlePeripheral {
      * @private
      */
     _routeIncoming (data) {
-        this._rxTotal += data.length;
+        let text = data.toString('latin1');
+        if (this._livePushEnabled) {
+            // Push frames may interleave with anything (the sampler is
+            // a background thread); strip them before any protocol or
+            // console handling sees the stream. Frames do not count as
+            // line activity either: a still-running sampler must not
+            // keep _interruptAndDrain waiting for a quiet line forever.
+            text = this._extractPushFrames(text);
+        }
+        this._rxTotal += text.length;
+        if (text.length === 0) return;
         if (this._uploading || this._replCaptureDepth > 0) {
-            this._replBuffer += data.toString('latin1');
+            this._replBuffer += text;
             this._notifyReplWaiters();
             return;
         }
-        this._bufferConsoleData(data);
+        this._bufferConsoleData(Buffer.from(text, 'latin1'));
+    }
+
+    /**
+     * Remove complete push sampler frames from an incoming chunk and
+     * hand them to _handlePushFrame; everything else (including a
+     * malformed frame body, byte for byte) flows on unchanged. A frame
+     * split across packets is carried until its end marker arrives; a
+     * carry that outgrows any real frame is released back into the
+     * stream, so a stray frame-start byte in user output can only
+     * delay, never eat, the data.
+     * @param {string} text - incoming chunk (latin1).
+     * @return {string} - the chunk with complete frames removed.
+     * @private
+     */
+    _extractPushFrames (text) {
+        let data = this._livePushCarry + text;
+        this._livePushCarry = '';
+        let out = '';
+        for (;;) {
+            const start = data.indexOf(LIVE_PUSH_FRAME_START);
+            if (start === -1) {
+                out += data;
+                break;
+            }
+            out += data.slice(0, start);
+            const end = data.indexOf(LIVE_PUSH_FRAME_END, start + 1);
+            if (end === -1) {
+                const partial = data.slice(start);
+                if (partial.length > LIVE_PUSH_MAX_FRAME) {
+                    // Not a frame: release the start byte and rescan the
+                    // rest, real frames further in are still recovered.
+                    out += LIVE_PUSH_FRAME_START;
+                    data = partial.slice(1);
+                    continue;
+                }
+                this._livePushCarry = partial;
+                break;
+            }
+            if (this._handlePushFrame(data.slice(start + 1, end))) {
+                data = data.slice(end + 1);
+                continue;
+            }
+            // Well-delimited but not a frame of ours: keep the bytes.
+            out += LIVE_PUSH_FRAME_START;
+            data = data.slice(start + 1);
+        }
+        return out;
+    }
+
+    /**
+     * Consume one push sampler frame body: 'P' <generation> ';'
+     * <values>. A well-formed frame is always consumed; it updates the
+     * read cache only when it is current: right generation (config the
+     * vm believes running), no state-changing command unsettled and out
+     * of the post-write grace, and the value count matching the
+     * expression list. Every current-generation frame refreshes the
+     * sampler liveness clock even when its values are not used.
+     * @param {string} body - the bytes between the frame markers.
+     * @return {boolean} - true when consumed as a frame.
+     * @private
+     */
+    _handlePushFrame (body) {
+        if (body.charAt(0) !== 'P') return false;
+        const sep = body.indexOf(';');
+        if (sep <= 1) return false;
+        const gen = Number(body.slice(1, sep));
+        if (!Number.isInteger(gen)) return false;
+        if (gen !== this._livePushGen || !this._livePushActive) return true;
+        this._livePushLastFrame = Date.now();
+        if (this._liveWritesInFlight > 0 || Date.now() < this._livePushMuteUntil) return true;
+        const values = body.slice(sep + 1).split(LIVE_READ_SEPARATOR);
+        if (values.length !== this._livePushExprs.length) return true;
+        const time = Date.now();
+        this._livePushExprs.forEach((expression, index) => {
+            const entry = this._liveReadCache[expression];
+            // An in-flight real read owns the slot; its reply is on the
+            // same ordered stream and lands right after anyway.
+            if (entry && entry.promise) return;
+            this._liveReadCache[expression] = {value: values[index].trim(), time};
+        });
+        return true;
     }
 
     /**
@@ -1040,6 +1249,16 @@ class MicroPythonBlePeripheral {
             await this._waitFor('>');
             await this._probeBleMtu();
             await this._execRaw(LIVE_PROLOGUE);
+            // The prologue killed any still-running push sampler (e.g.
+            // after a board-fs exchange rebuilt the session while the vm
+            // still believed push active). Drop the vm-side state without
+            // charging the failure budget; the next beat restarts push.
+            if (this._livePushActive || this._livePushStarting) {
+                this._livePushActive = false;
+                this._livePushStarting = false;
+                this._livePushExprs = [];
+                this._livePushGen++;
+            }
             this._reportLiveAvailable();
         } catch (err) {
             this._liveReady = false;
@@ -1056,6 +1275,17 @@ class MicroPythonBlePeripheral {
      */
     async _exitLiveMode () {
         if (!this._liveReady) return;
+        // Best-effort sampler stop while the raw REPL is still ours
+        // (this runs inside the live queue, so _execRaw directly; going
+        // through execLive would deadlock on the queue). A failed stop
+        // only leaves frames to be dropped by the generation check.
+        if ((this._livePushActive || this._livePushStarting) && this.isConnected()) {
+            try {
+                await this._execRaw(MicroPythonBlePeripheral.buildLivePushStopCommand());
+            } catch (e) {
+                log.warn('MicroPython push sampler stop failed:', e.message);
+            }
+        }
         this._resetLiveState();
         if (!this.isConnected()) return;
         await this._writeRaw(Buffer.from('\x02'));
@@ -1088,10 +1318,15 @@ class MicroPythonBlePeripheral {
             this._reportLiveUnavailable();
             return Promise.resolve(null);
         }
-        if (options.isReadOnly !== true) {
+        const isWrite = options.isReadOnly !== true;
+        if (isWrite) {
             // The command may move pins or reconfigure peripherals, any
-            // cached sensor reading could be stale afterwards.
+            // cached sensor reading could be stale afterwards. Push
+            // frames in flight may have been sampled before the write
+            // executes; they are ignored until the write settles (plus
+            // a one-period grace, see _handlePushFrame).
             this._liveReadCache = {};
+            this._liveWritesInFlight++;
         }
         this._liveInFlight++;
         const finished = this._enqueueLive(async () => {
@@ -1150,6 +1385,12 @@ class MicroPythonBlePeripheral {
         // their next reads already on the wire. The pump re-arm keeps
         // hot expressions refreshing even when no read is pending.
         return finished.then(result => {
+            if (isWrite) {
+                this._liveWritesInFlight--;
+                if (this._liveWritesInFlight === 0) {
+                    this._livePushMuteUntil = Date.now() + this._livePushWriteMuteMs;
+                }
+            }
             this._liveInFlight--;
             if (this._liveInFlight === 0) {
                 this._flushLiveReads();
@@ -1503,7 +1744,11 @@ class MicroPythonBlePeripheral {
             return;
         }
         this._pendingLiveReads = [];
-        this._dispatchLiveReads(batch, this._collectHotRiders(batch));
+        // While the push sampler is streaming frames the hot expressions
+        // are already being refreshed at the sampling rate; riding them
+        // along would only bloat the command and the reply.
+        const riders = this._livePushActive ? [] : this._collectHotRiders(batch);
+        this._dispatchLiveReads(batch, riders);
     }
 
     /**
@@ -1600,9 +1845,147 @@ class MicroPythonBlePeripheral {
         // exchanges and the live-mode handshake, which do not run
         // through the live queue.
         if (!this.isReady() || this._replCaptureDepth > 0) return;
+        if (this._manageLivePush()) return;
         const riders = this._collectHotRiders([]);
         if (riders.length === 0) return;
         this._dispatchLiveReads([], riders);
+    }
+
+    /**
+     * One push-management beat, run in place of a pump batch: keep the
+     * board sampler matched to the hot expression set ((re)start it on
+     * config changes, stop it when nothing is hot), watch its liveness
+     * and fall back to the resident pump when it stalls or keeps
+     * failing. Returns true when push owns the refreshing right now, so
+     * the caller skips the pump batch; false hands the beat to the pump
+     * (push disabled, given up, or just found dead).
+     * @return {boolean} - whether the pump batch should be skipped.
+     * @private
+     */
+    _manageLivePush () {
+        if (!this._livePushEnabled || this._livePushUnsupported) return false;
+        if (this._livePushStarting) return true;
+        const hot = this._collectHotExpressions();
+        if (hot.length === 0) {
+            // Nothing to refresh: shut a running sampler down; either
+            // way there is no pump work.
+            if (this._livePushActive) this._stopLivePush();
+            return true;
+        }
+        if (this._livePushActive) {
+            if (Date.now() - this._livePushLastFrame > this._livePushStallMs) {
+                // The sampler died silently (session rebuild killed it,
+                // thread crashed...): count the failure and let the pump
+                // take over this very beat; the next beat retries the
+                // start until the failure budget is spent.
+                this._livePushActive = false;
+                this._livePushGen++;
+                this._livePushFailures++;
+                if (this._livePushFailures >= LIVE_PUSH_MAX_FAILURES) {
+                    this._livePushUnsupported = true;
+                }
+                return false;
+            }
+            if (this._samePushConfig(hot)) {
+                // Healthy and matching: keep the beat alive so config
+                // changes, hot-window expiry and stalls are noticed even
+                // while every read is answered from the cache.
+                this._scheduleLiveReadPump();
+                return true;
+            }
+        }
+        this._startLivePush(hot);
+        return true;
+    }
+
+    /**
+     * The hot expressions (recently read) the push sampler should
+     * serve, pruned, sorted for stable config comparison and capped
+     * like a batched read command.
+     * @return {Array.<string>} - the expressions.
+     * @private
+     */
+    _collectHotExpressions () {
+        const now = Date.now();
+        const hot = [];
+        for (const expression of Object.keys(this._liveReadLastSeen)) {
+            if (now - this._liveReadLastSeen[expression] > LIVE_READ_HOT_WINDOW) {
+                delete this._liveReadLastSeen[expression];
+                continue;
+            }
+            hot.push(expression);
+        }
+        hot.sort();
+        return hot.slice(0, LIVE_READ_BATCH_LIMIT);
+    }
+
+    /**
+     * Whether the running sampler already serves exactly this (sorted)
+     * expression list.
+     * @param {Array.<string>} exprs - the wanted expressions.
+     * @return {boolean} - true when the config matches.
+     * @private
+     */
+    _samePushConfig (exprs) {
+        if (exprs.length !== this._livePushExprs.length) return false;
+        return exprs.every((expression, index) => expression === this._livePushExprs[index]);
+    }
+
+    /**
+     * (Re)start the board push sampler for an expression list. The
+     * start command is idempotent board-side: assigning the new
+     * generation makes the previous sampler thread exit by itself.
+     * Successful acknowledgement arms the frame path; anything else
+     * (transport null, board error, missing marker - e.g. a firmware
+     * without _thread) counts against the failure budget and the
+     * resident pump serves the session once it is spent.
+     * @param {Array.<string>} exprs - sorted expressions to sample.
+     * @private
+     */
+    _startLivePush (exprs) {
+        this._livePushStarting = true;
+        const gen = ++this._livePushGen;
+        const command = MicroPythonBlePeripheral.buildLivePushStartCommand(
+            exprs, gen, LIVE_PUSH_INTERVAL);
+        this.execLive(command, REPL_RESPONSE_TIMEOUT, {isReadOnly: true}).then(output => {
+            this._livePushStarting = false;
+            // Superseded by a newer start/stop/reset meanwhile.
+            if (gen !== this._livePushGen) return;
+            if (output !== null && String(output).indexOf(LIVE_PUSH_ACK) !== -1) {
+                this._livePushActive = true;
+                this._livePushExprs = exprs;
+                this._livePushLastFrame = Date.now();
+            } else {
+                this._livePushActive = false;
+                this._livePushFailures++;
+                if (this._livePushFailures >= LIVE_PUSH_MAX_FAILURES) {
+                    this._livePushUnsupported = true;
+                }
+            }
+            // Either way the next beat acts on the new state (watch
+            // frames or pump).
+            this._scheduleLiveReadPump();
+        });
+    }
+
+    /**
+     * Stop the board push sampler (nothing hot anymore, or an upload is
+     * about to take the channel). vm-side state drops synchronously so
+     * frames already in flight are ignored at once; the board command
+     * is best effort - a failed stop only means a few more dropped
+     * frames until the sampler notices the generation change.
+     * @return {Promise} - resolves when the stop command settled.
+     * @private
+     */
+    _stopLivePush () {
+        const wasRunning = this._livePushActive || this._livePushStarting;
+        this._livePushActive = false;
+        this._livePushStarting = false;
+        this._livePushExprs = [];
+        this._livePushGen++;
+        if (!wasRunning) return Promise.resolve(null);
+        return this.execLive(MicroPythonBlePeripheral.buildLivePushStopCommand(),
+            REPL_RESPONSE_TIMEOUT, {isReadOnly: true});
     }
 
     /**
@@ -1671,6 +2054,53 @@ class MicroPythonBlePeripheral {
             ' try:_r.append(str(_f()))\n' +
             " except:_r.append('')\n" +
             `print('\\x1e'.join(_r))`;
+    }
+
+    /**
+     * Build the python command installing the push sampler thread. The
+     * thread evaluates the expressions every period (same value
+     * semantics as a batched read: str(), empty string per failing
+     * expression) and writes one delimited frame to stdout, which
+     * os.dupterm mirrors into the BLE notification stream. It exits by
+     * itself once the global generation no longer matches (the stop
+     * command, a newer start and the live prologue all reassign it).
+     * A background thread instead of machine.Timer: on this port
+     * hardware timer ids alias (Timer(-1) is Timer(3)) and the obble
+     * firmware owns that timer while connected, and threads need no
+     * micropython.schedule slot either. Frames above the size cap are
+     * skipped, the vm-side stall fallback covers pathological values.
+     * @param {Array.<string>} expressions - python expressions to sample.
+     * @param {number} gen - config generation embedded in every frame.
+     * @param {number} periodMs - sampling period.
+     * @return {string} - the python source.
+     */
+    static buildLivePushStartCommand (expressions, gen, periodMs) {
+        const lambdas = expressions.map(expression => `lambda:(${expression})`).join(',');
+        return 'import sys,time,_thread\n' +
+            `_ob_push_g=${gen}\n` +
+            'def _ob_push_run(_g,_fs):\n' +
+            ' while _ob_push_g==_g:\n' +
+            '  try:\n' +
+            '   _r=[]\n' +
+            '   for _f in _fs:\n' +
+            '    try:_r.append(str(_f()))\n' +
+            "    except:_r.append('')\n" +
+            "   _s='\\x1cP%d;%s\\x1d'%(_g,'\\x1e'.join(_r))\n" +
+            '   if len(_s)<=512:sys.stdout.write(_s)\n' +
+            '  except:pass\n' +
+            `  time.sleep_ms(${periodMs})\n` +
+            `_thread.start_new_thread(_ob_push_run,(${gen},(${lambdas},)))\n` +
+            `print('${LIVE_PUSH_ACK}')`;
+    }
+
+    /**
+     * Build the python command stopping the push sampler: the thread
+     * loop exits once the generation no longer matches.
+     * @return {string} - the python source.
+     */
+    static buildLivePushStopCommand () {
+        return '_ob_push_g=-1\n' +
+            "print('OBPUSHOFF')";
     }
 
     /**
@@ -1808,6 +2238,11 @@ class MicroPythonBlePeripheral {
             return;
         }
 
+        // Stop the push sampler first (queued like any live command):
+        // the soft reboot would kill it anyway, but a sampler running
+        // through the upload would interleave frames with every REPL
+        // exchange until then.
+        this._stopLivePush();
         // Wait for pending live commands, then take over the REPL channel.
         await this._liveQueue;
         this._liveReady = false;

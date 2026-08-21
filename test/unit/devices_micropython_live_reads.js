@@ -46,6 +46,11 @@ const makeReadPeripheral = (values, options = {}) => {
     );
     peripheral.isConnected = () => true;
     peripheral._liveReady = true;
+    // This file covers the batched-read and resident-pump semantics,
+    // i.e. the refresh path when the board push sampler is not running
+    // (Web Serial, old firmware, push failure). The push path has its
+    // own suite in devices_micropython_live_push.js.
+    peripheral._livePushEnabled = false;
     const commands = [];
     const held = [];
     const answer = (command, rawPaste) => {
