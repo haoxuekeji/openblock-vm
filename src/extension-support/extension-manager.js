@@ -802,6 +802,17 @@ class ExtensionManager {
                     const getToolboxXML = global.registerToolboxs;
                     const realtimePrimitives = global.registerDeviceExtensionRuntime ?
                         global.registerDeviceExtensionRuntime(this.runtime) : null;
+                    if (deviceExtension.runtime && !realtimePrimitives) {
+                        // A fetched runtime.js that never sets the global has
+                        // almost certainly died at parse time (e.g. top-level
+                        // const colliding with another extension's script).
+                        // Without this trace the extension loads fine but every
+                        // realtime block silently does nothing.
+                        log.error(`Device extension ${deviceExtension.extensionId} declares ` +
+                            `runtime "${deviceExtension.runtime}" but no realtime primitives were ` +
+                            `registered after loading it. Check the browser console for a syntax ` +
+                            `error in that script; its realtime blocks will do nothing.`);
+                    }
                     this.runtime.addDeviceExtension(
                         deviceExtensionId,
                         getToolboxXML(),
