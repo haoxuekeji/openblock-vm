@@ -185,10 +185,33 @@ class Scratch3MlClassifierBlocks {
          */
         this.firstInstall = true;
 
+        /**
+         * Set once the extension is unloaded; stops the classify loop.
+         * @type {boolean}
+         */
+        this._disposed = false;
+
+        /**
+         * Bound PROJECT_LOADED handler, kept so dispose() can remove it.
+         * @type {Function}
+         */
+        this._onProjectLoaded = this.updateVideoDisplay.bind(this);
+
         if (this.runtime.ioDevices) {
-            this.runtime.on(Runtime.PROJECT_LOADED, this.updateVideoDisplay.bind(this));
+            this.runtime.on(Runtime.PROJECT_LOADED, this._onProjectLoaded);
             this._loop();
         }
+    }
+
+    /**
+     * Release the classify loop and the runtime listener. Called by the
+     * extension manager when the extension is unloaded; without it the
+     * continuous classification kept polling camera frames after removal.
+     */
+    dispose () {
+        this._disposed = true;
+        this._continuous = false;
+        this.runtime.removeListener(Runtime.PROJECT_LOADED, this._onProjectLoaded);
     }
 
     /**
@@ -257,6 +280,7 @@ class Scratch3MlClassifierBlocks {
      * @private
      */
     _loop () {
+        if (this._disposed) return;
         setTimeout(this._loop.bind(this), Math.max(this.runtime.currentStepTime, 50));
 
         if (!this._continuous) return;

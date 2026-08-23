@@ -101,12 +101,14 @@ class Scratch3BodySensingBlocks {
         this.runtime = runtime;
 
         /**
-         * Per part detection state.
+         * Per part detection state. `suppressed` records an explicit user
+         * stop so the auto-enabling reporters/hats don't immediately restart
+         * the detector (see _autoEnable).
          * @type {object}
          */
         this._detectors = {
-            [DetectionPart.HANDS]: {active: false, instance: null, loading: null, busy: false},
-            [DetectionPart.POSE]: {active: false, instance: null, loading: null, busy: false}
+            [DetectionPart.HANDS]: {active: false, suppressed: false, instance: null, loading: null, busy: false},
+            [DetectionPart.POSE]: {active: false, suppressed: false, instance: null, loading: null, busy: false}
         };
 
         /**
@@ -128,9 +130,61 @@ class Scratch3BodySensingBlocks {
          */
         this.firstInstall = true;
 
+        /**
+         * Set once the extension is unloaded; stops the detection loop and
+         * blocks any late detector setup.
+         * @type {boolean}
+         */
+        this._disposed = false;
+
+        /**
+         * Bound PROJECT_LOADED handler, kept so dispose() can remove it.
+         * @type {Function}
+         */
+        this._onProjectLoaded = this.updateVideoDisplay.bind(this);
+
         if (this.runtime.ioDevices) {
-            this.runtime.on(Runtime.PROJECT_LOADED, this.updateVideoDisplay.bind(this));
+            this.runtime.on(Runtime.PROJECT_LOADED, this._onProjectLoaded);
             this._loop();
+        }
+    }
+
+    /**
+     * Release everything this extension holds: the detection loop, the
+     * MediaPipe solution instances and the runtime listener. Called by the
+     * extension manager when the extension is unloaded; without it the
+     * detectors kept consuming camera frames forever after removal.
+     */
+    dispose () {
+        this._disposed = true;
+        this.runtime.removeListener(Runtime.PROJECT_LOADED, this._onProjectLoaded);
+        Object.keys(this._detectors).forEach(part => {
+            const detector = this._detectors[part];
+            detector.active = false;
+            detector.loading = null;
+            const instance = detector.instance;
+            detector.instance = null;
+            if (instance) {
+                this._closeSolution(instance);
+            }
+        });
+        this._handLandmarks = null;
+        this._poseLandmarks = null;
+    }
+
+    /**
+     * Best-effort close of a MediaPipe solution instance.
+     * @param {object} instance - the solution to close.
+     * @private
+     */
+    _closeSolution (instance) {
+        try {
+            const closing = instance.close();
+            if (closing && typeof closing.catch === 'function') {
+                closing.catch(() => {});
+            }
+        } catch (e) {
+            // Closing a half-initialized solution may throw; nothing to do.
         }
     }
 
@@ -222,6 +276,14 @@ class Scratch3BodySensingBlocks {
                 };
             detector.loading = createSolution(part, options)
                 .then(instance => {
+                    if (this._disposed) {
+                        // The extension was unloaded while the model was
+                        // still downloading; don't resurrect the detector.
+                        detector.loading = null;
+                        detector.active = false;
+                        this._closeSolution(instance);
+                        return instance;
+                    }
                     instance.onResults(results => this._onResults(part, results));
                     detector.instance = instance;
                     detector.loading = null;
@@ -258,6 +320,7 @@ class Scratch3BodySensingBlocks {
      * @private
      */
     _loop () {
+        if (this._disposed) return;
         setTimeout(this._loop.bind(this), Math.max(this.runtime.currentStepTime, DETECT_INTERVAL));
 
         const video = this.runtime.ioDevices && this.runtime.ioDevices.video;
@@ -724,6 +787,10 @@ class Scratch3BodySensingBlocks {
 
     enableDetection (args) {
         const part = Cast.toString(args.PART);
+        const detector = this._detectors[part];
+        if (detector) {
+            detector.suppressed = false;
+        }
         return this._ensureDetector(part).catch(() => {
             // The warning is already logged; don't stop the script.
         });
@@ -734,6 +801,12 @@ class Scratch3BodySensingBlocks {
         const detector = this._detectors[part];
         if (!detector) return;
         detector.active = false;
+        // Remember the explicit stop. Reporters and hats auto-start their
+        // detector (_autoEnable), and edge-activated hats are polled every
+        // step even while the project is stopped, so without this flag any
+        // "when gesture" block in the workspace re-enabled detection right
+        // after the user asked it to stop.
+        detector.suppressed = true;
         if (part === DetectionPart.HANDS) {
             this._handLandmarks = null;
         } else {
@@ -743,7 +816,7 @@ class Scratch3BodySensingBlocks {
 
     _autoEnable (part) {
         const detector = this._detectors[part];
-        if (detector && !detector.active) {
+        if (detector && !detector.active && !detector.suppressed) {
             this._ensureDetector(part).catch(() => {
                 // The warning is already logged; reporters simply keep
                 // returning their empty defaults.

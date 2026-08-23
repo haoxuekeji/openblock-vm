@@ -2927,8 +2927,16 @@ class Runtime extends EventEmitter {
      * @param {string} id id of this device extension.
      */
     removeScratchExtension (id) {
-        this._blockInfo.splice(this._blockInfo.indexOf(id), 1);
-        this._loadedScratchExtensions.splice(this._loadedScratchExtensions.indexOf(id), 1);
+        // _blockInfo holds categoryInfo objects, so it must be searched by
+        // category id. The previous indexOf(id) never matched and spliced
+        // index -1, i.e. it silently removed the LAST registered category:
+        // with two extensions loaded, unloading the first one made the other
+        // one's toolbox category disappear while its own stayed behind.
+        this._blockInfo = this._blockInfo.filter(info => info.id !== id);
+        const loadedIndex = this._loadedScratchExtensions.indexOf(id);
+        if (loadedIndex !== -1) {
+            this._loadedScratchExtensions.splice(loadedIndex, 1);
+        }
         this.emit(Runtime.SCRATCH_EXTENSION_REMOVED);
     }
 

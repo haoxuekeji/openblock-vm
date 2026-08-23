@@ -33,6 +33,13 @@ const getResourcesBaseCandidates = () => {
     return candidates;
 };
 
+/**
+ * Builtin scratch extensions that drive the camera through ioDevices.video.
+ * Used to shut the shared video feed down when the last of them is unloaded.
+ * @type {Array.<string>}
+ */
+const VIDEO_SENSING_EXTENSIONS = ['videoSensing', 'mlClassifier', 'bodySensing'];
+
 // These extensions are currently built into the VM repository but should not be loaded at startup.
 // TODO: move these out into a separate repository?
 // TODO: change extension spec so that library info, including extension ID, can be collected through static methods
@@ -549,16 +556,60 @@ class ExtensionManager {
      * @param {string} extensionURL - the URL for the extension to load OR the ID of an internal extension
      */
     unloadExtension (extensionURL) {
+        const serviceName = this._loadedExtensions.get(extensionURL);
+        if (serviceName) {
+            this._disposeExtensionService(serviceName);
+        }
         this._loadedExtensions.delete(extensionURL);
         this.runtime.removeScratchExtension(extensionURL);
+        this._disableVideoIfUnused();
     }
 
     /**
      * Unload all extension
      */
     clearExtensions () {
+        this._loadedExtensions.forEach(serviceName => this._disposeExtensionService(serviceName));
         this._loadedExtensions.clear();
         this.runtime.clearScratchExtension();
+        this._disableVideoIfUnused();
+    }
+
+    /**
+     * Let an internal extension instance release whatever it holds (camera
+     * loops, ML models, runtime listeners) and drop it from the dispatch
+     * service table. Without this, unloaded extensions kept running their
+     * detection loops against the live camera forever.
+     * @param {string} serviceName - the dispatch service name of the extension.
+     * @private
+     */
+    _disposeExtensionService (serviceName) {
+        const serviceObject = dispatch.services[serviceName];
+        if (serviceObject && typeof serviceObject.dispose === 'function') {
+            try {
+                serviceObject.dispose();
+            } catch (e) {
+                log.warn(`Error disposing extension service ${serviceName}: ${e}`);
+            }
+            delete dispatch.services[serviceName];
+        }
+    }
+
+    /**
+     * Turn the camera feed off once no loaded extension uses it any more.
+     * The video device is shared between the video sensing style extensions;
+     * none of them owns it, so the manager decides when the last user is
+     * gone. Otherwise removing the extension left the camera (and its
+     * on-stage preview) running with no block left in the toolbox to stop it.
+     * @private
+     */
+    _disableVideoIfUnused () {
+        const stillUsed = VIDEO_SENSING_EXTENSIONS.some(id => this._loadedExtensions.has(id));
+        if (stillUsed) return;
+        const video = this.runtime.ioDevices && this.runtime.ioDevices.video;
+        if (video) {
+            video.disableVideo();
+        }
     }
 
     /**
