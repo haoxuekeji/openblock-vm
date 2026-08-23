@@ -1635,6 +1635,19 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Release a servo pin (live mode), stopping the PWM signal so the
+     * servo no longer holds its position. The next setServoOutput on the
+     * same pin recreates the PWM object.
+     * @param {string} pin - the pin number.
+     * @return {Promise} - resolved when done.
+     */
+    releaseServo (pin) {
+        if (!this._liveObjects.has(`servo${pin}`)) return Promise.resolve();
+        this._liveObjects.delete(`servo${pin}`);
+        return this.execLive(`servo${pin}.deinit()`);
+    }
+
+    /**
      * Run init code on the board once per live session.
      * @param {string} key - identifier of the object/module.
      * @param {string} initCode - python statements creating it.

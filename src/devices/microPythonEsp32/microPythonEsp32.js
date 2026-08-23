@@ -839,6 +839,22 @@ class OpenBlockMicroPythonEsp32Device {
                         }
                     },
                     {
+                        opcode: 'servoRelease',
+                        text: formatMessage({
+                            id: 'microPythonEsp32.pins.servoRelease',
+                            default: 'release servo pin [PIN]',
+                            description: 'microPythonEsp32 release servo pin'
+                        }),
+                        blockType: BlockType.COMMAND,
+                        arguments: {
+                            PIN: {
+                                type: ArgumentType.STRING,
+                                menu: 'outPins',
+                                defaultValue: Pins.IO4
+                            }
+                        }
+                    },
+                    {
                         opcode: 'esp32PlayTone',
                         text: formatMessage({
                             id: 'microPythonEsp32.pins.esp32PlayTone',
@@ -1052,6 +1068,21 @@ class OpenBlockMicroPythonEsp32Device {
                         }
                     },
                     {
+                        opcode: 'neopixelSetBrightness',
+                        text: formatMessage({
+                            id: 'microPythonEsp32.neopixel.neopixelSetBrightness',
+                            default: 'set NeoPixel brightness [BRT]%',
+                            description: 'microPythonEsp32 set neopixel brightness'
+                        }),
+                        blockType: BlockType.COMMAND,
+                        arguments: {
+                            BRT: {
+                                type: ArgumentType.INTOTO100_NUMBER,
+                                defaultValue: '30'
+                            }
+                        }
+                    },
+                    {
                         opcode: 'neopixelShow',
                         text: formatMessage({
                             id: 'microPythonEsp32.neopixel.neopixelShow',
@@ -1122,6 +1153,9 @@ class OpenBlockMicroPythonEsp32Device {
                             description: 'microPythonEsp32 read ds18b20 temperature'
                         }),
                         blockType: BlockType.REPORTER,
+                        // DS18B20 moved to the espDs18b20 extension; the block
+                        // stays registered so old projects still load and run.
+                        hideFromPalette: true,
                         arguments: {
                             PIN: {
                                 type: ArgumentType.STRING,
@@ -1392,6 +1426,19 @@ class OpenBlockMicroPythonEsp32Device {
     }
 
     /**
+     * Release the servo on a pin (realtime mode), stopping the PWM signal
+     * so the servo no longer holds its position.
+     * @param {object} args - the block's arguments.
+     * @return {Promise} - resolved when done.
+     */
+    servoRelease (args) {
+        if (this._peripheral.releaseServo) {
+            return this._peripheral.releaseServo(args.PIN);
+        }
+        return Promise.resolve();
+    }
+
+    /**
      * Print text to the console (realtime mode).
      * @param {object} args - the block's arguments.
      * @return {Promise} - resolved when done.
@@ -1444,7 +1491,8 @@ class OpenBlockMicroPythonEsp32Device {
         const pin = args.PIN;
         const count = Math.max(1, Math.round(Number(args.COUNT) || 1));
         return this._peripheral.execLive(
-            `import neopixel\n_ob_np = neopixel.NeoPixel(Pin(${pin}), ${count})`
+            `import neopixel\n_ob_np = neopixel.NeoPixel(Pin(${pin}), ${count})\n` +
+            `_ob_np_brt = globals().get('_ob_np_brt', 1.0)`
         ).then(() => this._peripheral.ensureLiveObject('_ob_np', ''));
     }
 
@@ -1458,8 +1506,22 @@ class OpenBlockMicroPythonEsp32Device {
         const index = Math.round(Number(args.INDEX) || 0);
         const clamp = v => Math.min(255, Math.max(0, Math.round(Number(v) || 0)));
         return this._peripheral.execLive(
-            `_ob_np[${index}] = (${clamp(args.R)}, ${clamp(args.G)}, ${clamp(args.B)})`
+            `_ob_np[${index}] = (int(${clamp(args.R)} * _ob_np_brt), ` +
+            `int(${clamp(args.G)} * _ob_np_brt), int(${clamp(args.B)} * _ob_np_brt))`
         );
+    }
+
+    /**
+     * Set the neopixel brightness in percent (realtime mode). Applies to
+     * the colors set afterwards, mirroring the upload mode semantics.
+     * @param {object} args - the block's arguments.
+     * @return {Promise} - resolved when done.
+     */
+    neopixelSetBrightness (args) {
+        if (!this._live) return Promise.resolve();
+        const raw = Number(args.BRT);
+        const brt = Math.min(100, Math.max(0, isNaN(raw) ? 100 : Math.round(raw)));
+        return this._peripheral.execLive(`_ob_np_brt = ${brt / 100}`);
     }
 
     /**
@@ -1597,7 +1659,8 @@ class OpenBlockMicroPythonEsp32Device {
         if (!this._live || !this._peripheral.hasLiveObject('_ob_np')) return Promise.resolve();
         const clamp = v => Math.min(255, Math.max(0, Math.round(Number(v) || 0)));
         return this._peripheral.execLive(
-            `_ob_np.fill((${clamp(args.R)}, ${clamp(args.G)}, ${clamp(args.B)}))`
+            `_ob_np.fill((int(${clamp(args.R)} * _ob_np_brt), ` +
+            `int(${clamp(args.G)} * _ob_np_brt), int(${clamp(args.B)} * _ob_np_brt)))`
         );
     }
 
