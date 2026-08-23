@@ -683,7 +683,9 @@ class MicroPythonBlePeripheral {
      */
     write (data) {
         if (!this.isConnected()) return Promise.resolve();
-        return this._writeRaw(Buffer.from(data));
+        // Console sends are fire-and-forget; a failed write has already
+        // triggered the disconnect handling, do not surface a rejection.
+        return this._writeRaw(Buffer.from(data)).catch(() => {});
     }
 
     /**
@@ -693,7 +695,7 @@ class MicroPythonBlePeripheral {
      */
     send (message) {
         if (!this.isConnected()) return Promise.resolve();
-        return this._writeRaw(Buffer.from(message));
+        return this._writeRaw(Buffer.from(message)).catch(() => {});
     }
 
     /**
@@ -705,6 +707,11 @@ class MicroPythonBlePeripheral {
     async _writeRaw (buffer) {
         const chunkSize = this._bleChunkSize;
         for (let i = 0; i < buffer.length; i += chunkSize) {
+            // An aborted upload must not keep pushing the remaining
+            // chunks of a large block onto a possibly wedged link.
+            if (this._uploading && this._abort) {
+                throw new Error('Aborted');
+            }
             const chunk = buffer.slice(i, i + chunkSize);
             await this._ble.write(NUS_SERVICE, NUS_RX, chunk.toString('base64'), 'base64', false);
         }
@@ -1208,6 +1215,11 @@ class MicroPythonBlePeripheral {
         let quietPolls = 0;
         let resent = false;
         while (Date.now() - start < maxWaitMs && quietPolls < 3) {
+            // React to a user abort within one poll instead of sitting
+            // out the whole drain window.
+            if (this._uploading && this._abort) {
+                throw new Error('Aborted');
+            }
             await wait(100);
             if (this._rxTotal === lastTotal) {
                 quietPolls++;
@@ -2313,8 +2325,9 @@ class MicroPythonBlePeripheral {
             const aborted = err.message === 'Aborted';
             this._uploading = false;
             if (aborted) {
-                // Try to leave raw REPL so the board is usable again.
-                this._writeRaw(Buffer.from('\x02'));
+                // Try to leave raw REPL so the board is usable again
+                // (best effort, the link may already be gone).
+                this._writeRaw(Buffer.from('\x02')).catch(() => {});
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_UPLOAD_SUCCESS, true);
             } else {
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_UPLOAD_ERROR, {

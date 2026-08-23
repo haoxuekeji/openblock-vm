@@ -3,6 +3,17 @@ const log = require('../util/log');
 
 const WEB_BLE_CONNECT_TIMEOUT = 15000;
 const WEB_BLE_NOTIFICATION_SETUP_TIMEOUT = 2500;
+// Silent reconnects (after an upload reboot or a connection drop) must not
+// accept a half-open link: a pending notification subscription means the rx
+// path may never come up, and the wedged CCCD operation can park every
+// later GATT write forever. Give the subscription more time than the user
+// path (a healthy Windows stack has been seen taking ~8s), then fail the
+// attempt so the reconnect loop retries with a fresh GATT connection.
+const WEB_BLE_SILENT_NOTIFICATION_SETUP_TIMEOUT = 8000;
+// A GATT write on a silently dead link can stay pending forever on
+// Windows (no resolve, no reject, no gattserverdisconnected). Bound every
+// write so the callers' await chains always terminate.
+const WEB_BLE_GATT_WRITE_TIMEOUT = 10000;
 
 /**
  * localStorage key prefix remembering the last connected Web Bluetooth
@@ -222,6 +233,13 @@ class WebBLE {
         this._silentConnect = false;
         this._connectAttempt = 0;
 
+        // Timeouts are injectable for unit tests only.
+        this._notificationSetupTimeout =
+            options.notificationSetupTimeout || WEB_BLE_NOTIFICATION_SETUP_TIMEOUT;
+        this._silentNotificationSetupTimeout =
+            options.silentNotificationSetupTimeout || WEB_BLE_SILENT_NOTIFICATION_SETUP_TIMEOUT;
+        this._gattWriteTimeout = options.gattWriteTimeout || WEB_BLE_GATT_WRITE_TIMEOUT;
+
         /**
          * Whether the current device handle came from the chooser-free
          * remembered-device path; a failed connect then blocks that path
@@ -390,10 +408,15 @@ class WebBLE {
 
                 // Some Chrome/Web Bluetooth combinations establish GATT
                 // immediately but leave startNotifications() pending for a
-                // long time even though notifications become usable. Start
-                // notification setup and wait briefly for real failures, but
-                // do not let that browser promise block the connection modal
-                // until the global connection timeout.
+                // long time even though notifications become usable. On a
+                // user-initiated connect, start notification setup and wait
+                // briefly for real failures, but do not let that browser
+                // promise block the connection modal until the global
+                // connection timeout. On a silent reconnect however a
+                // pending subscription is how the post-upload zombie session
+                // is born (rx dead, next GATT write pending forever), so
+                // there the attempt fails instead and the reconnect loop
+                // retries from a clean GATT connection.
                 let notificationTimeoutId = null;
                 const notificationSetup = Promise.resolve(this._connectCallback())
                     .then(() => {
@@ -402,13 +425,18 @@ class WebBLE {
                     });
                 const notificationTimeout = new Promise(resolve => {
                     notificationTimeoutId = window.setTimeout(() => {
-                        log.warn('[WebBLE] Notification setup still pending; continuing with GATT connection');
                         resolve(false);
-                    }, WEB_BLE_NOTIFICATION_SETUP_TIMEOUT);
+                    }, silent ? this._silentNotificationSetupTimeout : this._notificationSetupTimeout);
                 });
                 return Promise.race([notificationSetup, notificationTimeout])
                     .then(result => {
                         window.clearTimeout(notificationTimeoutId);
+                        if (result === false) {
+                            if (silent) {
+                                throw new Error('Bluetooth notification setup timed out');
+                            }
+                            log.warn('[WebBLE] Notification setup still pending; continuing with GATT connection');
+                        }
                         return result;
                     });
             })
@@ -584,13 +612,33 @@ class WebBLE {
                 } else {
                     data = new TextEncoder().encode(message);
                 }
-                if (withResponse) {
-                    return characteristic.writeValueWithResponse(data);
-                }
-                return characteristic.writeValueWithoutResponse(data);
+                const writePromise = withResponse ?
+                    characteristic.writeValueWithResponse(data) :
+                    characteristic.writeValueWithoutResponse(data);
+                // Seen live on Windows: after a flapping reconnect the
+                // write promise on the dead link never settles and no
+                // disconnect event ever fires, parking the awaiting upload
+                // flow forever (stuck at "Entering raw REPL..."). Bound the
+                // write and treat a timeout like a dropped connection.
+                return new Promise((resolve, reject) => {
+                    const timer = window.setTimeout(() => {
+                        reject(new Error('GATT write timed out'));
+                    }, this._gattWriteTimeout);
+                    writePromise.then(value => {
+                        window.clearTimeout(timer);
+                        resolve(value);
+                    }, error => {
+                        window.clearTimeout(timer);
+                        reject(error);
+                    });
+                });
             })
             .catch(e => {
                 this.handleDisconnectError(e);
+                // Callers await their writes: propagate the failure so
+                // REPL flows fail fast instead of waiting for an answer
+                // to bytes that never left the browser.
+                throw e;
             });
     }
 
