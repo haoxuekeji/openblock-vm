@@ -318,6 +318,14 @@ class Runtime extends EventEmitter {
         this._isRealtimeMode = true;
 
         /**
+         * One-shot flag: the program mode was just restored from a loaded
+         * project, so the GUI should not override it with the device's
+         * defaultProgramMode when the device finishes loading.
+         * @type {boolean}
+         */
+        this._restoredProgramMode = false;
+
+        /**
          * Currently selected device.
          * @type {?object}
          */
@@ -2977,6 +2985,25 @@ class Runtime extends EventEmitter {
      */
     isRealtimeMode () {
         return this._isRealtimeMode;
+    }
+
+    /**
+     * Mark the current program mode as restored from a saved project. The
+     * GUI consumes this flag when the device finishes loading and skips
+     * applying the device's defaultProgramMode over the restored mode.
+     */
+    markProgramModeRestored () {
+        this._restoredProgramMode = true;
+    }
+
+    /**
+     * Consume the "program mode restored from project" one-shot flag.
+     * @return {boolean} true when the mode was just restored from a project.
+     */
+    consumeProgramModeRestored () {
+        const restored = this._restoredProgramMode;
+        this._restoredProgramMode = false;
+        return restored;
     }
 
     /**

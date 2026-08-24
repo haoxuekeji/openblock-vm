@@ -791,17 +791,30 @@ class VirtualMachine extends EventEmitter {
      * Install `deserialize` results: device.
      * @param {Array.<Target>} targets - the targets to be installed
      * @param {object} device - the device to be installed
-     * @param {string} programMode - the program mode
+     * @param {string} [programMode] - the program mode saved in the project,
+     * 'realtime' or 'upload'. Missing in old project files.
      * @returns {Promise} Promise that resolves after all device extensions has loaded
      */
-    installDevice (targets, device, programMode = 'realtime') {
+    installDevice (targets, device, programMode) {
         targets = targets.filter(target => !!target);
 
         if (device.deviceId) {
-            this.runtime.setRealtimeMode(programMode === 'realtime');
+            const explicitMode = programMode === 'realtime' || programMode === 'upload';
+            this.runtime.setRealtimeMode(programMode !== 'upload');
+            if (explicitMode) {
+                // Reopen the project in the mode it was saved in: the GUI
+                // consumes this one-shot flag when the device finishes
+                // loading and skips the defaultProgramMode override. Old
+                // files without the field keep the device default behavior.
+                this.runtime.markProgramModeRestored();
+            }
 
             return this.extensionManager.loadDeviceURL(device)
-                .then(() => targets);
+                .then(() => targets)
+                .catch(error => {
+                    this.runtime.consumeProgramModeRestored();
+                    throw error;
+                });
         }
         return targets;
     }
