@@ -87,6 +87,84 @@ const ArgumentTypeMap = (() => {
             fieldName: 'NUM'
         }
     };
+    map[ArgumentType.INTEGER_NUMBER] = {
+        shadow: {
+            type: 'math_integer',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.WHOLE_NUMBER] = {
+        shadow: {
+            type: 'math_whole_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.POSITIVE_NUMBER] = {
+        shadow: {
+            type: 'math_positive_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INT8_NUMBER] = {
+        shadow: {
+            type: 'math_int8_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.UINT8_NUMBER] = {
+        shadow: {
+            type: 'math_uint8_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INT9_NUMBER] = {
+        shadow: {
+            type: 'math_int9_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.UINT10_NUMBER] = {
+        shadow: {
+            type: 'math_uint10_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INT11_NUMBER] = {
+        shadow: {
+            type: 'math_int11_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.UINT16_NUMBER] = {
+        shadow: {
+            type: 'math_uint16_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INTOTO100_NUMBER] = {
+        shadow: {
+            type: 'math_int0to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.OTO100_NUMBER] = {
+        shadow: {
+            type: 'math_0to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.INTN100TO100_NUMBER] = {
+        shadow: {
+            type: 'math_intn100to100_number',
+            fieldName: 'NUM'
+        }
+    };
+    map[ArgumentType.N100TO100_NUMBER] = {
+        shadow: {
+            type: 'math_n100to100_number',
+            fieldName: 'NUM'
+        }
+    };
     map[ArgumentType.STRING] = {
         shadow: {
             type: 'text',
@@ -102,28 +180,16 @@ const ArgumentTypeMap = (() => {
             fieldName: 'MATRIX'
         }
     };
+    map[ArgumentType.MATRIX8X12] = {
+        shadow: {
+            type: 'matrix8x12',
+            fieldName: 'MATRIX'
+        }
+    };
     map[ArgumentType.NOTE] = {
         shadow: {
             type: 'note',
             fieldName: 'NOTE'
-        }
-    };
-    map[ArgumentType.OTO100_NUMBER] = {
-        shadow: {
-            type: 'math_0to100_number',
-            fieldName: 'NUM'
-        }
-    };
-    map[ArgumentType.UINT8_NUMBER] = {
-        shadow: {
-            type: 'math_uint8_number',
-            fieldName: 'NUM'
-        }
-    };
-    map[ArgumentType.UINT10_NUMBER] = {
-        shadow: {
-            type: 'math_uint10_number',
-            fieldName: 'NUM'
         }
     };
     return map;
@@ -252,22 +318,18 @@ class Runtime extends EventEmitter {
         this._isRealtimeMode = true;
 
         /**
-         * Currently selected device's id.
-         * @type {?Device}
+         * One-shot flag: the program mode was just restored from a loaded
+         * project, so the GUI should not override it with the device's
+         * defaultProgramMode when the device finishes loading.
+         * @type {boolean}
          */
-        this._deviceId = null;
+        this._restoredProgramMode = false;
 
         /**
-         * Currently selected device type.
-         * @type {?DeviceType}
+         * Currently selected device.
+         * @type {?object}
          */
-        this._deviceType = null;
-
-        /**
-         * Currently device pnp id list.
-         * @type {?Array.<string>}
-         */
-        this._pnpIdList = [];
+        this._device = {deviceId: null, type: null, pnpIdList: []};
 
         /**
          * Currently device realtime firmware serialport baudrate.
@@ -775,6 +837,37 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for reporting that a peripheral connection dropped
+     * unexpectedly and an automatic reconnect attempt is in progress.
+     * This causes a 'reconnecting' alert to display; it resolves into
+     * either PERIPHERAL_CONNECTED or PERIPHERAL_CONNECTION_LOST_ERROR.
+     * @const {string}
+     */
+    static get PERIPHERAL_RECONNECTING () {
+        return 'PERIPHERAL_RECONNECTING';
+    }
+
+    /**
+     * Event name for reporting that the realtime (live) command channel of a
+     * connected peripheral is not usable right now: blocks return null/0
+     * until it is rebuilt. Emitted throttled while blocks keep running so
+     * the GUI can show a non-blocking hint instead of fake data.
+     * @const {string}
+     */
+    static get PERIPHERAL_LIVE_UNAVAILABLE () {
+        return 'PERIPHERAL_LIVE_UNAVAILABLE';
+    }
+
+    /**
+     * Event name for reporting that the realtime (live) command channel is
+     * usable again after PERIPHERAL_LIVE_UNAVAILABLE was reported.
+     * @const {string}
+     */
+    static get PERIPHERAL_LIVE_AVAILABLE () {
+        return 'PERIPHERAL_LIVE_AVAILABLE';
+    }
+
+    /**
      * Event name for reporting that a peripheral realtime connection has been lost.
      * This causes a 'peripheral connection realtime lost' error alert to display.
      * @const {string}
@@ -843,6 +936,16 @@ class Runtime extends EventEmitter {
      */
     static get PERIPHERAL_UPLOAD_SUCCESS () {
         return 'PERIPHERAL_UPLOAD_SUCCESS';
+    }
+
+    /**
+     * Event name for asking the user to confirm flashing the MicroPython
+     * firmware, which erases the whole board flash. The event payload
+     * carries a `respond` callback expecting a boolean.
+     * @const {string}
+     */
+    static get PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM () {
+        return 'PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM';
     }
 
     /**
@@ -1090,8 +1193,8 @@ class Runtime extends EventEmitter {
             return categoryInfo;
         });
         // send original device id but not real deivce id.
-        const originalDeivceId = deviceId ? this._deviceId : null;
-        this.emit(Runtime.SCRATCH_EXTENSION_ADDED, {extensionId, deviceId: originalDeivceId, categoryInfoArray});
+        const originalDeviceId = deviceId ? this._device.deviceId : null;
+        this.emit(Runtime.SCRATCH_EXTENSION_ADDED, {extensionId, deviceId: originalDeviceId, categoryInfoArray});
     }
 
     /**
@@ -1231,7 +1334,7 @@ class Runtime extends EventEmitter {
         };
     }
 
-    _buildCustomFieldInfo (fieldName, fieldInfo, extensionId, categoryInfo) {
+    _buildCustomFieldInfo (fieldName, fieldInfo, extensionId) {
         const extendedName = `${extensionId}_${fieldName}`;
         return {
             fieldName: fieldName,
@@ -1239,14 +1342,12 @@ class Runtime extends EventEmitter {
             argumentTypeInfo: {
                 shadow: {
                     type: extendedName,
-                    fieldName: `field_${extendedName}`
+                    fieldName: fieldInfo.args0[0].name
                 }
             },
             scratchBlocksDefinition: this._buildCustomFieldTypeForScratchBlocks(
                 extendedName,
-                fieldInfo.output,
-                fieldInfo.outputShape,
-                categoryInfo
+                fieldInfo
             ),
             fieldImplementation: fieldInfo.implementation
         };
@@ -1256,28 +1357,21 @@ class Runtime extends EventEmitter {
      * Build the scratch-blocks JSON needed for a fieldType.
      * Custom field types need to be namespaced to the extension so that extensions can't interfere with each other
      * @param  {string} fieldName - The name of the field
-     * @param {string} output - The output of the field
-     * @param {number} outputShape - Shape of the field (from ScratchBlocksConstants)
-     * @param {object} categoryInfo - The category the field belongs to (Used to set its colors)
+     * @param {string} fieldInfo - The info of the field
      * @returns {object} - Object to be inserted into scratch-blocks
      */
-    _buildCustomFieldTypeForScratchBlocks (fieldName, output, outputShape, categoryInfo) {
+    _buildCustomFieldTypeForScratchBlocks (fieldName, fieldInfo) {
         return {
             json: {
                 type: fieldName,
                 message0: '%1',
                 inputsInline: true,
-                output: output,
-                colour: categoryInfo.color1,
-                colourSecondary: categoryInfo.color2,
-                colourTertiary: categoryInfo.color3,
-                outputShape: outputShape,
-                args0: [
-                    {
-                        name: `field_${fieldName}`,
-                        type: `field_${fieldName}`
-                    }
-                ]
+                output: fieldInfo.output,
+                colour: fieldInfo.color1,
+                colourSecondary: fieldInfo.color2,
+                colourTertiary: fieldInfo.color3,
+                outputShape: fieldInfo.outputShape,
+                args0: fieldInfo.args0
             }
         };
     }
@@ -1694,19 +1788,27 @@ class Runtime extends EventEmitter {
      * @param {?Target} [target] - the active editing target (optional)
      */
     getBlocksXML (target) {
-        const _loadedDeviceExtensionsXML = [];
+        const activeProgramMode = this.isRealtimeMode() ?
+            ProgramModeType.REALTIME : ProgramModeType.UPLOAD;
+        const loadedDeviceExtensionsInfo = [];
         this._loadedDeviceExtensions.forEach((value, id) => {
-
-            _loadedDeviceExtensionsXML.push({id: id, xml: value.xml});
+            const supportedModes = value.programMode || [ProgramModeType.UPLOAD];
+            if (supportedModes.includes(activeProgramMode)) {
+                loadedDeviceExtensionsInfo.push({id, xml: value.xml});
+            }
         });
 
-        if (this.getDeviceId() === null) {
+        if (this._device.deviceId === null) {
             return this.generateXMLfromBlockInfo(target, this._blockInfo);
-        } else if (this.isRealtimeMode()) {
-            return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo.concat(this._blockInfo));
         }
-        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo).concat(_loadedDeviceExtensionsXML);
-
+        if (this.isRealtimeMode()) {
+            return this.generateXMLfromBlockInfo(
+                target,
+                this._deviceBlockInfo.concat(this._blockInfo)
+            ).concat(loadedDeviceExtensionsInfo);
+        }
+        return this.generateXMLfromBlockInfo(target, this._deviceBlockInfo)
+            .concat(loadedDeviceExtensionsInfo);
     }
 
     /**
@@ -1757,6 +1859,49 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Select the transport used by a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} transport - transport id such as link, webserial, or webble.
+     * @return {?string} selected transport, or null for devices without transport selection.
+     */
+    setPeripheralTransport (deviceId, transport) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.setTransport === 'function') {
+            return peripheral.setTransport(transport);
+        }
+        return null;
+    }
+
+    /**
+     * Return the active transport of a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @return {?string} active transport id.
+     */
+    getPeripheralTransport (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.getTransport === 'function') {
+            return peripheral.getTransport();
+        }
+        return null;
+    }
+
+    /**
+     * Return transports supported by a logical multi-transport peripheral.
+     * @param {string} deviceId - the id of the device.
+     * @return {Array.<string>} supported transport ids.
+     */
+    getPeripheralTransports (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.getSupportedTransports === 'function') {
+            return peripheral.getSupportedTransports();
+        }
+        return [];
+    }
+
+    /**
      * To get real device id. eg: the third party id like ironKit_arduinoUno.
      * @param {string} deviceId - the id of the device.
      * @return {string} deviceId - the real device id.
@@ -1780,7 +1925,7 @@ class Runtime extends EventEmitter {
         deviceId = this.analysisRealDeviceId(deviceId);
 
         if (this.peripheralExtensions[deviceId]) {
-            this.peripheralExtensions[deviceId].scan(this.getPnpIdList(), listAll);
+            this.peripheralExtensions[deviceId].scan(this._device.pnpIdList, listAll);
         }
     }
 
@@ -1793,7 +1938,7 @@ class Runtime extends EventEmitter {
     connectPeripheral (deviceId, peripheralId, baudrate) {
         deviceId = this.analysisRealDeviceId(deviceId);
 
-        if (this.peripheralExtensions[deviceId]) {           
+        if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].connect(peripheralId, baudrate);
         }
     }
@@ -1834,6 +1979,22 @@ class Runtime extends EventEmitter {
         if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].write(data);
         }
+    }
+
+    /**
+     * Hard reset the extension's connected peripheral, e.g. by pulsing the
+     * serial DTR/RTS lines wired to the reset circuit of the board.
+     * @param {string} deviceId - the id of the device.
+     * @return {Promise<boolean>} - true when the transport supports it.
+     */
+    hardResetPeripheral (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (peripheral && typeof peripheral.hardReset === 'function') {
+            return Promise.resolve(peripheral.hardReset());
+        }
+        return Promise.resolve(false);
     }
 
     /**
@@ -1886,6 +2047,86 @@ class Runtime extends EventEmitter {
         if (this.peripheralExtensions[deviceId]) {
             this.peripheralExtensions[deviceId].uploadFirmware();
         }
+    }
+
+    /**
+     * Whether the specified peripheral can actually flash firmware over its
+     * current connection transport.
+     * @param {string} deviceId - the id of the device.
+     * @return {boolean} - true when uploadFirmware would really flash.
+     */
+    canUploadFirmwareToPeripheral (deviceId) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral) return false;
+        if (typeof peripheral.canUploadFirmware === 'function') {
+            return Boolean(peripheral.canUploadFirmware());
+        }
+        // Peripherals that do not report the capability (e.g. third party
+        // device extensions) keep the legacy always-enabled behaviour.
+        return typeof peripheral.uploadFirmware === 'function';
+    }
+
+    /**
+     * List files on the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} directory - board directory.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (deviceId, directory) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.listBoardFiles !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.listBoardFiles(directory);
+    }
+
+    /**
+     * Read a file from the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @return {Promise<object>}
+     */
+    readBoardFile (deviceId, filePath) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.readBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.readBoardFile(filePath);
+    }
+
+    /**
+     * Remove a file from the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (deviceId, filePath) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.removeBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.removeBoardFile(filePath);
+    }
+
+    /**
+     * Write a file to the connected MicroPython board.
+     * @param {string} deviceId - the id of the device.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file content.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (deviceId, filePath, contentBase64) {
+        deviceId = this.analysisRealDeviceId(deviceId);
+        const peripheral = this.peripheralExtensions[deviceId];
+        if (!peripheral || typeof peripheral.writeBoardFile !== 'function') {
+            return Promise.reject(new Error('Board file manager is not supported on this device'));
+        }
+        return peripheral.writeBoardFile(filePath, contentBase64);
     }
 
     /**
@@ -2515,51 +2756,26 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Set the current selected device's id known by the runtime.
-     * @param {!Device} deviceId of current.
+     * Set the current selected device known by the runtime.
+     * @param {!object} device the object of device.
      */
-    setDeviceId (deviceId) {
-        this._deviceId = deviceId;
+    setDevice (device) {
+        this._device = device;
+    }
+
+    /**
+     * Clear the selected device.
+     */
+    clearDevice () {
+        this._device = {deviceId: null, type: null, pnpIdList: []};
     }
 
     /**
      * Get the current selected device.
      * @return {?Device} current selected device known by the runtime.
      */
-    getDeviceId () {
-        return this._deviceId;
-    }
-
-    /**
-     * Set the current selected device type known by the runtime.
-     * @param {!DeviceType} type of deivce of current.
-     */
-    setDeviceType (type) {
-        this._deviceType = type;
-    }
-
-    /**
-     * Get the current selected device type.
-     * @return {?DeviceType} current selected device type known by the runtime.
-     */
-    getDeviceType () {
-        return this._deviceType;
-    }
-
-    /**
-     * Set the device pnp id list known by the runtime.
-     * @param {Array.<string>} pnpidList pnp id list.
-     */
-    setPnpIdList (pnpidList) {
-        this._pnpIdList = pnpidList;
-    }
-
-    /**
-     * Get the current device pnp id list.
-     * @return {?Array.<string>} current device pnp id list known by the runtime.
-     */
-    getPnpIdList () {
-        return this._pnpIdList;
+    getDevice () {
+        return this._device;
     }
 
     /**
@@ -2575,9 +2791,58 @@ class Runtime extends EventEmitter {
      * @param {string} id id of this device extension.
      * @param {string} xml toolbox xml of this device extension.
      * @param {Array.<string>} library path of this device extension.
+     * @param {Array.<string>} libraryFiles urls of the library .py files, used
+     * by browser-direct uploaders to install them on the board.
+     * @param {object} realtimePrimitives optional opcode-to-function map used
+     * while the MicroPython device is in realtime mode. A non-enumerable
+     * `hats` property may contain opcode-to-hat-metadata entries.
+     * @param {Array.<string>} programMode modes in which the extension toolbox
+     * should be visible. Legacy extensions default to upload mode only.
      */
-    addDeviceExtension (id, xml, library) {
-        this._loadedDeviceExtensions.set(id, {xml: xml, library: library});
+    addDeviceExtension (
+        id,
+        xml,
+        library,
+        libraryFiles,
+        realtimePrimitives = null,
+        programMode = [ProgramModeType.UPLOAD]
+    ) {
+        if (this._loadedDeviceExtensions.has(id)) {
+            this.removeDeviceExtension(id);
+        }
+        const registeredPrimitives = {};
+        const registeredHats = {};
+        if (realtimePrimitives) {
+            Object.keys(realtimePrimitives).forEach(opcode => {
+                const primitive = realtimePrimitives[opcode];
+                if (typeof primitive === 'function') {
+                    this._primitives[opcode] = primitive;
+                    registeredPrimitives[opcode] = primitive;
+                }
+            });
+            const realtimeHats = realtimePrimitives.hats;
+            if (realtimeHats && typeof realtimeHats === 'object') {
+                Object.keys(realtimeHats).forEach(opcode => {
+                    const hat = realtimeHats[opcode];
+                    if (!hat || typeof hat !== 'object') return;
+                    registeredHats[opcode] = {
+                        edgeActivated: hat.edgeActivated === true,
+                        restartExistingThreads: hat.restartExistingThreads === true
+                    };
+                    this._hats[opcode] = registeredHats[opcode];
+                });
+            }
+        }
+        const supportedProgramModes = Array.isArray(programMode) && programMode.length > 0 ?
+            programMode.slice() : [ProgramModeType.UPLOAD];
+        this._loadedDeviceExtensions.set(id, {
+            xml,
+            library,
+            libraryFiles,
+            realtimePrimitives: registeredPrimitives,
+            realtimeHats: registeredHats,
+            programMode: supportedProgramModes
+        });
     }
 
     /**
@@ -2585,6 +2850,21 @@ class Runtime extends EventEmitter {
      * @param {string} id id of this device extension.
      */
     removeDeviceExtension (id) {
+        const extension = this._loadedDeviceExtensions.get(id);
+        if (extension && extension.realtimePrimitives) {
+            Object.keys(extension.realtimePrimitives).forEach(opcode => {
+                if (this._primitives[opcode] === extension.realtimePrimitives[opcode]) {
+                    delete this._primitives[opcode];
+                }
+            });
+        }
+        if (extension && extension.realtimeHats) {
+            Object.keys(extension.realtimeHats).forEach(opcode => {
+                if (this._hats[opcode] === extension.realtimeHats[opcode]) {
+                    delete this._hats[opcode];
+                }
+            });
+        }
         this._loadedDeviceExtensions.delete(id);
     }
 
@@ -2592,7 +2872,9 @@ class Runtime extends EventEmitter {
      * Clear all device extensions of the _loadedDeviceExtensions.
      */
     clearDeviceExtension () {
-        this._loadedDeviceExtensions.clear();
+        Array.from(this._loadedDeviceExtensions.keys()).forEach(id => {
+            this.removeDeviceExtension(id);
+        });
     }
 
     /**
@@ -2609,11 +2891,7 @@ class Runtime extends EventEmitter {
      * @return {Array.id} array of current loaded device extension ids.
      */
     getLoadedDeviceExtension () {
-        const ids = [];
-        this._loadedDeviceExtensions.forEach((value, id) => {
-            ids.push(id);
-        });
-        return ids;
+        return Array.from(this._loadedDeviceExtensions.keys());
     }
 
     /**
@@ -2631,7 +2909,21 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Add a extension to the _loadedScratchExtensions.
+     * Get the library file urls of the current loaded device extensions.
+     * @return {Array.<string>} array of library .py file urls.
+     */
+    getCurrentDeviceExtensionLibraryFiles () {
+        const files = [];
+        this._loadedDeviceExtensions.forEach(value => {
+            if (value.libraryFiles) {
+                files.push(...value.libraryFiles);
+            }
+        });
+        return files;
+    }
+
+    /**
+     * Add a scratch extension id to the _loadedScratchExtensions.
      * @param {string} id id of this extension.
      */
     addScratchExtension (id) {
@@ -2639,18 +2931,37 @@ class Runtime extends EventEmitter {
     }
 
     /**
-     * Clear all extensions of the _loadedScratchExtensions.
+     * Remove a scratch extension id from the _loadedScratchExtensions.
+     * @param {string} id id of this device extension.
+     */
+    removeScratchExtension (id) {
+        // _blockInfo holds categoryInfo objects, so it must be searched by
+        // category id. The previous indexOf(id) never matched and spliced
+        // index -1, i.e. it silently removed the LAST registered category:
+        // with two extensions loaded, unloading the first one made the other
+        // one's toolbox category disappear while its own stayed behind.
+        this._blockInfo = this._blockInfo.filter(info => info.id !== id);
+        const loadedIndex = this._loadedScratchExtensions.indexOf(id);
+        if (loadedIndex !== -1) {
+            this._loadedScratchExtensions.splice(loadedIndex, 1);
+        }
+        this.emit(Runtime.SCRATCH_EXTENSION_REMOVED);
+    }
+
+    /**
+     * Clear all scratch extensions.
      */
     clearScratchExtension () {
         this._blockInfo = [];
         this._loadedScratchExtensions = [];
+        this.emit(Runtime.SCRATCH_EXTENSION_REMOVED);
     }
 
     /**
-     * Get the current Loaded extension.
+     * Get the current Loaded scratch extension.
      * @return {Array.id} array of current loaded extension ids.
      */
-    getLoadedExtension () {
+    getLoadedScratchExtension () {
         return this._loadedScratchExtensions;
     }
 
@@ -2661,8 +2972,8 @@ class Runtime extends EventEmitter {
     setRealtimeMode (sta) {
         if (this._isRealtimeMode !== sta){
             this._isRealtimeMode = sta;
-            if (sta && this.getPeripheralIsConnected(this._deviceId)) {
-                this.setPeripheralBaudrate(this._deviceId, this._realtimeBaudrate);
+            if (sta && this.getPeripheralIsConnected(this._device.deviceId)) {
+                this.setPeripheralBaudrate(this._device.deviceId, this._realtimeBaudrate);
             }
             this.emit(Runtime.PROGRAM_MODE_UPDATE, {isRealtimeMode: this._isRealtimeMode});
         }
@@ -2674,6 +2985,25 @@ class Runtime extends EventEmitter {
      */
     isRealtimeMode () {
         return this._isRealtimeMode;
+    }
+
+    /**
+     * Mark the current program mode as restored from a saved project. The
+     * GUI consumes this flag when the device finishes loading and skips
+     * applying the device's defaultProgramMode over the restored mode.
+     */
+    markProgramModeRestored () {
+        this._restoredProgramMode = true;
+    }
+
+    /**
+     * Consume the "program mode restored from project" one-shot flag.
+     * @return {boolean} true when the mode was just restored from a project.
+     */
+    consumeProgramModeRestored () {
+        const restored = this._restoredProgramMode;
+        this._restoredProgramMode = false;
+        return restored;
     }
 
     /**
@@ -3038,23 +3368,22 @@ class Runtime extends EventEmitter {
      * @property {string} [label] - the label for this opcode if `labelFn` is absent
      */
     getLabelForOpcode (extendedOpcode) {
-        const categoryAndOpcode = extendedOpcode;
-        const [category, opcode] = StringUtil.splitFirst(categoryAndOpcode, '_');
+        // Device category ids contain underscores (e.g. `microPython_sensor`), so instead of
+        // splitting on the first underscore, match the longest category id prefix.
+        const allCategories = this._blockInfo.concat(this._deviceBlockInfo);
+        for (const categoryInfo of allCategories) {
+            if (!extendedOpcode.startsWith(`${categoryInfo.id}_`)) continue;
 
-        if (!(category && opcode)) return;
+            const opcode = extendedOpcode.substring(categoryInfo.id.length + 1);
+            const block = categoryInfo.blocks.find(b => b.info && b.info.opcode === opcode);
+            if (!block) continue;
 
-        const categoryInfo = this._blockInfo.find(ci => ci.id === category) ||
-            this._deviceBlockInfo.find(ci => ci.id === category);
-        if (!categoryInfo) return;
-
-        const block = categoryInfo.blocks.find(b => b.info.opcode === opcode);
-        if (!block) return;
-
-        // TODO: we may want to format the label in a locale-specific way.
-        return {
-            category: 'extension', // This assumes that all extensions have the same monitor color.
-            label: `${categoryInfo.name}: ${block.info.text}`
-        };
+            // TODO: we may want to format the label in a locale-specific way.
+            return {
+                category: 'extension', // This assumes that all extensions have the same monitor color.
+                label: `${categoryInfo.name}: ${block.info.text}`
+            };
+        }
     }
 
     /**

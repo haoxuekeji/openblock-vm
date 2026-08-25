@@ -548,6 +548,8 @@ class OpenBlockArduinoEsp8266Device {
 
         // Create a new Arduino esp8266 peripheral instance
         this._peripheral = new ArduinoEsp8266(this.runtime, this.DEVICE_ID, originalDeviceId);
+
+        this._peripheral.numDigitalPins = 17;
     }
 
     /**

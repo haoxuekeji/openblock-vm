@@ -1,17 +1,43 @@
 const JSONRPC = require('../util/jsonrpc');
+const log = require('../util/log');
 
-class BLE extends JSONRPC {
+const WEB_BLE_CONNECT_TIMEOUT = 15000;
+const WEB_BLE_NOTIFICATION_SETUP_TIMEOUT = 2500;
+// Silent reconnects (after an upload reboot or a connection drop) must not
+// accept a half-open link: a pending notification subscription means the rx
+// path may never come up, and the wedged CCCD operation can park every
+// later GATT write forever. Give the subscription more time than the user
+// path (a healthy Windows stack has been seen taking ~8s), then fail the
+// attempt so the reconnect loop retries with a fresh GATT connection.
+const WEB_BLE_SILENT_NOTIFICATION_SETUP_TIMEOUT = 8000;
+// A GATT write on a silently dead link can stay pending forever on
+// Windows (no resolve, no reject, no gattserverdisconnected). Bound every
+// write so the callers' await chains always terminate.
+const WEB_BLE_GATT_WRITE_TIMEOUT = 10000;
 
-    /**
-     * A BLE peripheral socket object.  It handles connecting, over web sockets, to
-     * BLE peripherals, and reading and writing data to them.
-     * @param {Runtime} runtime - the Runtime for sending/receiving GUI update events.
-     * @param {string} deviceId - the id of the extension using this socket.
-     * @param {object} peripheralOptions - the list of options for peripheral discovery.
-     * @param {object} connectCallback - a callback for connection.
-     * @param {object} resetCallback - a callback for resetting extension state.
-     */
-    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null) {
+/**
+ * localStorage key prefix remembering the last connected Web Bluetooth
+ * device per OpenBlock device id, for chooser-free reconnects.
+ * @readonly
+ */
+const WEB_BLE_MEMORY_PREFIX = 'openblock.webble.last.';
+
+/**
+ * Chooser-free reconnects that failed during this page session, keyed by
+ * the storage key. A granted device that cannot be connected (powered
+ * off, out of range) must not trap the user in an endless silent-retry
+ * loop: the next scan falls back to the system chooser instead. Cleared
+ * by the next successful connection.
+ * @type {object}
+ */
+const autoReconnectBlocked = {};
+
+/**
+ * Scratch Link based BLE backend using WebSocket + JSON-RPC.
+ * This is the original implementation that communicates through Scratch Link.
+ */
+class ScratchLinkBLE extends JSONRPC {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback) {
         super();
 
         this._socket = runtime.getScratchLinkSocket('BLE');
@@ -35,10 +61,6 @@ class BLE extends JSONRPC {
         this._socket.open();
     }
 
-    /**
-     * Request connection to the peripheral.
-     * If the web socket is not yet open, request when the socket promise resolves.
-     */
     requestPeripheral () {
         this._availablePeripherals = {};
         if (this._discoverTimeoutID) {
@@ -51,11 +73,6 @@ class BLE extends JSONRPC {
             });
     }
 
-    /**
-     * Try connecting to the input peripheral id, and then call the connect
-     * callback if connection is successful.
-     * @param {number} id - the id of the peripheral to connect to
-     */
     connectPeripheral (id) {
         this.sendRemoteRequest('connect', {peripheralId: id})
             .then(() => {
@@ -68,45 +85,25 @@ class BLE extends JSONRPC {
             });
     }
 
-    /**
-     * Close the websocket.
-     */
     disconnect () {
         if (this._connected) {
             this._connected = false;
         }
-
         if (this._socket.isOpen()) {
             this._socket.close();
         }
-
         if (this._discoverTimeoutID) {
             window.clearTimeout(this._discoverTimeoutID);
         }
-
-        // Sets connection status icon to orange
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
     }
 
-    /**
-     * @return {bool} whether the peripheral is connected.
-     */
     isConnected () {
         return this._connected;
     }
 
-    /**
-     * Start receiving notifications from the specified ble service.
-     * @param {number} serviceId - the ble service to read.
-     * @param {number} characteristicId - the ble characteristic to get notifications from.
-     * @param {object} onCharacteristicChanged - callback for characteristic change notifications.
-     * @return {Promise} - a promise from the remote startNotifications request.
-     */
     startNotifications (serviceId, characteristicId, onCharacteristicChanged = null) {
-        const params = {
-            serviceId,
-            characteristicId
-        };
+        const params = {serviceId, characteristicId};
         this._characteristicDidChangeCallback = onCharacteristicChanged;
         return this.sendRemoteRequest('startNotifications', params)
             .catch(e => {
@@ -114,19 +111,8 @@ class BLE extends JSONRPC {
             });
     }
 
-    /**
-     * Read from the specified ble service.
-     * @param {number} serviceId - the ble service to read.
-     * @param {number} characteristicId - the ble characteristic to read.
-     * @param {boolean} optStartNotifications - whether to start receiving characteristic change notifications.
-     * @param {object} onCharacteristicChanged - callback for characteristic change notifications.
-     * @return {Promise} - a promise from the remote read request.
-     */
     read (serviceId, characteristicId, optStartNotifications = false, onCharacteristicChanged = null) {
-        const params = {
-            serviceId,
-            characteristicId
-        };
+        const params = {serviceId, characteristicId};
         if (optStartNotifications) {
             params.startNotifications = true;
         }
@@ -139,15 +125,6 @@ class BLE extends JSONRPC {
             });
     }
 
-    /**
-     * Write data to the specified ble service.
-     * @param {number} serviceId - the ble service to write.
-     * @param {number} characteristicId - the ble characteristic to write.
-     * @param {string} message - the message to send.
-     * @param {string} encoding - the message encoding type.
-     * @param {boolean} withResponse - if true, resolve after peripheral's response.
-     * @return {Promise} - a promise from the remote send request.
-     */
     write (serviceId, characteristicId, message, encoding = null, withResponse = null) {
         const params = {serviceId, characteristicId, message};
         if (encoding) {
@@ -162,12 +139,6 @@ class BLE extends JSONRPC {
             });
     }
 
-    /**
-     * Handle a received call from the socket.
-     * @param {string} method - a received method label.
-     * @param {object} params - a received list of parameters.
-     * @return {object} - optional return value.
-     */
     didReceiveCall (method, params) {
         switch (method) {
         case 'didDiscoverPeripheral':
@@ -208,28 +179,12 @@ class BLE extends JSONRPC {
         }
     }
 
-    /**
-     * Handle an error resulting from losing connection to a peripheral.
-     *
-     * This could be due to:
-     * - battery depletion
-     * - going out of bluetooth range
-     * - being powered down
-     *
-     * Disconnect the socket, and if the extension using this socket has a
-     * reset callback, call it. Finally, emit an error to the runtime.
-     */
     handleDisconnectError (/* e */) {
-        // log.error(`BLE error: ${JSON.stringify(e)}`);
-
         if (!this._connected) return;
-
         this.disconnect();
-
         if (this._resetCallback) {
             this._resetCallback();
         }
-
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTION_LOST_ERROR, {
             message: `Scratch lost connection to`,
             deviceId: this._deviceId
@@ -237,8 +192,6 @@ class BLE extends JSONRPC {
     }
 
     _handleRequestError (/* e */) {
-        // log.error(`BLE error: ${JSON.stringify(e)}`);
-
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
             message: `Scratch lost connection to`,
             deviceId: this._deviceId
@@ -253,4 +206,651 @@ class BLE extends JSONRPC {
     }
 }
 
+/**
+ * Web Bluetooth API based BLE backend.
+ * Uses browser native BLE support directly without Scratch Link.
+ */
+class WebBLE {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback, options = {}) {
+        this._availablePeripherals = {};
+        this._connectCallback = connectCallback;
+        this._connected = false;
+        this._characteristicDidChangeCallback = null;
+        this._resetCallback = resetCallback;
+        this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
+        this._forceChooser = options.forceChooser === true;
+        this._discoverTimeoutID = null;
+        this._deviceId = deviceId;
+        this._peripheralOptions = peripheralOptions;
+        this._runtime = runtime;
+        this._storageKey = WEB_BLE_MEMORY_PREFIX + deviceId;
+
+        this._device = null;
+        this._server = null;
+        this._services = {};
+        this._characteristics = {};
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
+        this._connectAttempt = 0;
+
+        // Timeouts are injectable for unit tests only.
+        this._notificationSetupTimeout =
+            options.notificationSetupTimeout || WEB_BLE_NOTIFICATION_SETUP_TIMEOUT;
+        this._silentNotificationSetupTimeout =
+            options.silentNotificationSetupTimeout || WEB_BLE_SILENT_NOTIFICATION_SETUP_TIMEOUT;
+        this._gattWriteTimeout = options.gattWriteTimeout || WEB_BLE_GATT_WRITE_TIMEOUT;
+
+        /**
+         * Whether the current device handle came from the chooser-free
+         * remembered-device path; a failed connect then blocks that path
+         * for the rest of the page session instead of looping.
+         * @type {boolean}
+         */
+        this._adoptedFromMemory = false;
+    }
+
+    requestPeripheral () {
+        this._availablePeripherals = {};
+        if (this._discoverTimeoutID) {
+            window.clearTimeout(this._discoverTimeoutID);
+        }
+
+        return this._requestRememberedDevice().then(device => {
+            if (device) {
+                log.info('[WebBLE] Reusing granted device without chooser:', device.name, device.id);
+                this._adoptDevice(device, true);
+                return;
+            }
+            return this._requestDeviceViaChooser();
+        });
+    }
+
+    /**
+     * Look up the device of the last successful connection among the
+     * already granted devices (navigator.bluetooth.getDevices, persisted
+     * permission). Returns null when the chooser must be shown instead:
+     * chooser explicitly requested, API unavailable, nothing remembered,
+     * a failed silent attempt this session, or a lookup error.
+     * @return {Promise<?BluetoothDevice>} - the remembered device or null.
+     * @private
+     */
+    _requestRememberedDevice () {
+        if (this._forceChooser || autoReconnectBlocked[this._storageKey]) {
+            return Promise.resolve(null);
+        }
+        if (typeof navigator === 'undefined' || !navigator.bluetooth ||
+            typeof navigator.bluetooth.getDevices !== 'function') {
+            return Promise.resolve(null);
+        }
+        const rememberedId = this._recallDeviceId();
+        if (!rememberedId) {
+            return Promise.resolve(null);
+        }
+        return navigator.bluetooth.getDevices()
+            .then(devices => devices.find(device => device.id === rememberedId) || null)
+            .catch(e => {
+                log.warn('[WebBLE] getDevices failed, falling back to chooser:', e);
+                return null;
+            });
+    }
+
+    /**
+     * Open the system device chooser.
+     * @return {Promise} - resolved once the user picked a device.
+     * @private
+     */
+    _requestDeviceViaChooser () {
+        const requestOptions = {};
+        if (this._peripheralOptions.filters) {
+            requestOptions.filters = this._peripheralOptions.filters;
+        }
+        if (this._peripheralOptions.optionalServices) {
+            requestOptions.optionalServices = this._peripheralOptions.optionalServices;
+        }
+
+        log.info('[WebBLE] requestDevice with options:', JSON.stringify(requestOptions));
+
+        return navigator.bluetooth.requestDevice(requestOptions)
+            .then(device => {
+                log.info('[WebBLE] User selected device:', device.name, device.id);
+                this._adoptDevice(device, false);
+            });
+    }
+
+    /**
+     * Take a device handle (from the chooser or from the remembered
+     * granted devices) and publish it to the peripheral list. A device
+     * from memory is flagged so the GUI can skip the click and connect
+     * right away.
+     * @param {BluetoothDevice} device - the Web Bluetooth device handle.
+     * @param {boolean} fromMemory - true for the chooser-free path.
+     * @private
+     */
+    _adoptDevice (device, fromMemory) {
+        this._device = device;
+        this._adoptedFromMemory = fromMemory;
+        device.addEventListener(
+            'gattserverdisconnected', this.handleDisconnectError.bind(this));
+
+        const peripheralInfo = {
+            peripheralId: device.id,
+            name: device.name
+        };
+        if (fromMemory) {
+            peripheralInfo.rememberedDevice = true;
+        }
+        this._availablePeripherals[device.id] = peripheralInfo;
+
+        this._runtime.emit(
+            this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
+            this._availablePeripherals
+        );
+    }
+
+    /**
+     * Read the remembered device id of the last successful connection.
+     * @return {?string} - the device id or null.
+     * @private
+     */
+    _recallDeviceId () {
+        try {
+            return window.localStorage.getItem(this._storageKey);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Persist the device id after a successful connection.
+     * @param {string} id - the Web Bluetooth device id.
+     * @private
+     */
+    _rememberDeviceId (id) {
+        try {
+            window.localStorage.setItem(this._storageKey, id);
+        } catch (e) {
+            // Storage unavailable (privacy mode); reconnects keep asking.
+        }
+    }
+
+    connectPeripheral (id, options = {}) {
+        const silent = options.silent === true;
+        log.info('[WebBLE] connectPeripheral called, id:', id, 'device:', this._device ? this._device.name : 'null');
+        if (!this._device) {
+            const error = new Error('No device selected');
+            log.warn('[WebBLE] connectPeripheral failed: no device');
+            if (!silent) {
+                this._handleRequestError(error);
+                return Promise.resolve(false);
+            }
+            return Promise.reject(error);
+        }
+
+        // A soft reboot invalidates all GATT service/characteristic handles.
+        // Never reuse the cache from the previous connection.
+        this._connectAttempt += 1;
+        const connectAttempt = this._connectAttempt;
+        this._silentConnect = silent;
+        this._server = null;
+        this._services = {};
+        this._characteristics = {};
+
+        let timeoutId = null;
+        const connectPromise = this._device.gatt.connect()
+            .then(server => {
+                if (connectAttempt !== this._connectAttempt) {
+                    throw new Error('Bluetooth connection cancelled');
+                }
+                log.info('[WebBLE] GATT connected successfully');
+                this._server = server;
+                this._connected = true;
+                this._expectedDisconnect = false;
+
+                // Some Chrome/Web Bluetooth combinations establish GATT
+                // immediately but leave startNotifications() pending for a
+                // long time even though notifications become usable. On a
+                // user-initiated connect, start notification setup and wait
+                // briefly for real failures, but do not let that browser
+                // promise block the connection modal until the global
+                // connection timeout. On a silent reconnect however a
+                // pending subscription is how the post-upload zombie session
+                // is born (rx dead, next GATT write pending forever), so
+                // there the attempt fails instead and the reconnect loop
+                // retries from a clean GATT connection.
+                let notificationTimeoutId = null;
+                const notificationSetup = Promise.resolve(this._connectCallback())
+                    .then(() => {
+                        log.info('[WebBLE] Notification setup completed');
+                        return true;
+                    });
+                const notificationTimeout = new Promise(resolve => {
+                    notificationTimeoutId = window.setTimeout(() => {
+                        resolve(false);
+                    }, silent ? this._silentNotificationSetupTimeout : this._notificationSetupTimeout);
+                });
+                return Promise.race([notificationSetup, notificationTimeout])
+                    .then(result => {
+                        window.clearTimeout(notificationTimeoutId);
+                        if (result === false) {
+                            if (silent) {
+                                throw new Error('Bluetooth notification setup timed out');
+                            }
+                            log.warn('[WebBLE] Notification setup still pending; continuing with GATT connection');
+                        }
+                        return result;
+                    });
+            })
+            .then(() => {
+                if (connectAttempt !== this._connectAttempt) {
+                    throw new Error('Bluetooth connection cancelled');
+                }
+                // The transport is only usable after notification setup in
+                // the peripheral connect callback has completed.
+                if (!this._connected) {
+                    throw new Error('Bluetooth notifications could not be started');
+                }
+                // Remember the device for future chooser-free reconnects
+                // and unblock the silent path after an earlier failure.
+                this._rememberDeviceId(this._device.id);
+                delete autoReconnectBlocked[this._storageKey];
+                this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
+                this._silentConnect = false;
+                return true;
+            });
+
+        const timeoutPromise = new Promise((resolve, reject) => {
+            timeoutId = window.setTimeout(() => {
+                if (connectAttempt === this._connectAttempt) {
+                    this._connectAttempt += 1;
+                }
+                reject(new Error('Bluetooth connection timed out'));
+            }, WEB_BLE_CONNECT_TIMEOUT);
+        });
+
+        return Promise.race([connectPromise, timeoutPromise])
+            .then(result => {
+                window.clearTimeout(timeoutId);
+                return result;
+            })
+            .catch(e => {
+                window.clearTimeout(timeoutId);
+                log.error('[WebBLE] GATT connect error:', e);
+                const suppressError = this._silentConnect || silent;
+                if (connectAttempt === this._connectAttempt) {
+                    this._connectAttempt += 1;
+                }
+                if (this._adoptedFromMemory) {
+                    // The remembered device could not be connected (powered
+                    // off, out of range): the next scan must fall back to
+                    // the chooser instead of silently retrying forever.
+                    autoReconnectBlocked[this._storageKey] = true;
+                }
+                this._connected = false;
+                this._silentConnect = false;
+                if (this._device && this._device.gatt.connected) {
+                    this._device.gatt.disconnect();
+                }
+                this._server = null;
+                this._services = {};
+                this._characteristics = {};
+                if (!suppressError) {
+                    this._handleRequestError(e);
+                    return false;
+                }
+                throw e;
+            });
+    }
+
+    /**
+     * Mark the next GATT disconnect as part of an intentional board reboot.
+     * This suppresses the normal connection-lost event while auto reconnect
+     * is in progress.
+     */
+    expectDisconnect () {
+        this._expectedDisconnect = true;
+    }
+
+    disconnect (options = {}) {
+        const silent = options === true || options.silent === true;
+        log.info('[WebBLE] disconnect called');
+        this._connectAttempt += 1;
+        this._connected = false;
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
+        if (this._device && this._device.gatt.connected) {
+            this._device.gatt.disconnect();
+        }
+        if (this._discoverTimeoutID) {
+            window.clearTimeout(this._discoverTimeoutID);
+        }
+        this._server = null;
+        this._services = {};
+        this._characteristics = {};
+        if (!silent) {
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
+        }
+    }
+
+    isConnected () {
+        return this._connected;
+    }
+
+    _getCharacteristic (serviceId, characteristicId) {
+        const cacheKey = `${serviceId}__${characteristicId}`;
+        if (this._characteristics[cacheKey]) {
+            return Promise.resolve(this._characteristics[cacheKey]);
+        }
+
+        let servicePromise;
+        if (this._services[serviceId]) {
+            servicePromise = Promise.resolve(this._services[serviceId]);
+        } else {
+            servicePromise = this._server.getPrimaryService(serviceId)
+                .then(service => {
+                    this._services[serviceId] = service;
+                    return service;
+                });
+        }
+
+        return servicePromise
+            .then(service => service.getCharacteristic(characteristicId))
+            .then(characteristic => {
+                this._characteristics[cacheKey] = characteristic;
+                return characteristic;
+            });
+    }
+
+    startNotifications (serviceId, characteristicId, onCharacteristicChanged = null) {
+        this._characteristicDidChangeCallback = onCharacteristicChanged;
+        return this._getCharacteristic(serviceId, characteristicId)
+            .then(characteristic => {
+                characteristic.addEventListener('characteristicvaluechanged', event => {
+                    if (this._characteristicDidChangeCallback) {
+                        this._characteristicDidChangeCallback(
+                            WebBLE._dataViewToBase64(event.target.value)
+                        );
+                    }
+                });
+                return characteristic.startNotifications();
+            });
+    }
+
+    read (serviceId, characteristicId, optStartNotifications = false, onCharacteristicChanged = null) {
+        if (onCharacteristicChanged) {
+            this._characteristicDidChangeCallback = onCharacteristicChanged;
+        }
+        return this._getCharacteristic(serviceId, characteristicId)
+            .then(characteristic => {
+                if (optStartNotifications) {
+                    characteristic.addEventListener('characteristicvaluechanged', event => {
+                        if (this._characteristicDidChangeCallback) {
+                            this._characteristicDidChangeCallback(
+                                WebBLE._dataViewToBase64(event.target.value)
+                            );
+                        }
+                    });
+                    return characteristic.startNotifications()
+                        .then(() => characteristic.readValue());
+                }
+                return characteristic.readValue();
+            })
+            .then(dataView => ({
+                message: WebBLE._dataViewToBase64(dataView),
+                encoding: 'base64'
+            }))
+            .catch(e => {
+                this.handleDisconnectError(e);
+            });
+    }
+
+    write (serviceId, characteristicId, message, encoding = null, withResponse = null) {
+        return this._getCharacteristic(serviceId, characteristicId)
+            .then(characteristic => {
+                let data;
+                if (encoding === 'base64') {
+                    data = WebBLE._base64ToUint8Array(message);
+                } else {
+                    data = new TextEncoder().encode(message);
+                }
+                const writePromise = withResponse ?
+                    characteristic.writeValueWithResponse(data) :
+                    characteristic.writeValueWithoutResponse(data);
+                // Seen live on Windows: after a flapping reconnect the
+                // write promise on the dead link never settles and no
+                // disconnect event ever fires, parking the awaiting upload
+                // flow forever (stuck at "Entering raw REPL..."). Bound the
+                // write and treat a timeout like a dropped connection.
+                return new Promise((resolve, reject) => {
+                    const timer = window.setTimeout(() => {
+                        reject(new Error('GATT write timed out'));
+                    }, this._gattWriteTimeout);
+                    writePromise.then(value => {
+                        window.clearTimeout(timer);
+                        resolve(value);
+                    }, error => {
+                        window.clearTimeout(timer);
+                        reject(error);
+                    });
+                });
+            })
+            .catch(e => {
+                this.handleDisconnectError(e);
+                // Callers await their writes: propagate the failure so
+                // REPL flows fail fast instead of waiting for an answer
+                // to bytes that never left the browser.
+                throw e;
+            });
+    }
+
+    handleDisconnectError (e) {
+        log.warn('[WebBLE] handleDisconnectError:', e);
+        if (!this._connected) return;
+        if (this._expectedDisconnect || this._silentConnect) {
+            this.disconnect({silent: true});
+            return;
+        }
+        if (this._onUnexpectedDisconnect) {
+            // Tear the GATT state down silently and hand over to the
+            // owner, which drives an automatic reconnect using the still
+            // granted device handle and reports the loss itself only
+            // when that fails.
+            this.disconnect({silent: true});
+            this._onUnexpectedDisconnect();
+            return;
+        }
+        this.disconnect();
+        if (this._resetCallback) {
+            this._resetCallback();
+        }
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTION_LOST_ERROR, {
+            message: `Scratch lost connection to`,
+            deviceId: this._deviceId
+        });
+    }
+
+    _handleRequestError (e) {
+        log.error('[WebBLE] _handleRequestError:', e);
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+            message: (e && e.message) || 'Bluetooth connection failed',
+            deviceId: this._deviceId
+        });
+    }
+
+    static _base64ToUint8Array (base64) {
+        const binaryString = atob(base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
+    }
+
+    static _dataViewToBase64 (dataView) {
+        const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+}
+
+/**
+ * BLE facade that first tries the browser's Web Bluetooth API.
+ * If the browser doesn't support it, permissions are denied, or the user cancels
+ * the device picker, it automatically falls back to the Scratch Link backend.
+ *
+ * @param {Runtime} runtime - the Runtime for sending/receiving GUI update events.
+ * @param {string} deviceId - the id of the extension using this object.
+ * @param {object} peripheralOptions - the list of options for peripheral discovery.
+ * @param {object} connectCallback - a callback for connection.
+ * @param {object} resetCallback - a callback for resetting extension state.
+ * @param {object} options - backend selection options.
+ * @param {boolean} options.webOnly - do not fall back to Scratch Link.
+ * @param {Function} options.onUnexpectedDisconnect - when set, an unexpected
+ *   GATT disconnect is handed to this callback (after a silent teardown)
+ *   instead of emitting the connection-lost error, so the owner can try an
+ *   automatic reconnect first. Web Bluetooth backend only.
+ * @param {boolean} options.forceChooser - always show the system device
+ *   chooser instead of silently reusing the remembered granted device
+ *   (user explicitly rescans to switch boards). Web Bluetooth backend only.
+ */
+class BLE {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null, options = {}) {
+        this._runtime = runtime;
+        this._deviceId = deviceId;
+        this._peripheralOptions = peripheralOptions;
+        this._connectCallback = connectCallback;
+        this._resetCallback = resetCallback;
+        this._webOnly = options.webOnly === true;
+        this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
+        this._forceChooser = options.forceChooser === true;
+
+        this._backend = null;
+
+        if (BLE._isWebBluetoothSupported()) {
+            log.info('[BLE] Web Bluetooth API is supported, trying browser picker');
+            this._tryWebBluetooth();
+        } else if (this._webOnly) {
+            Promise.resolve().then(() => {
+                this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+                    message: 'Web Bluetooth API is not supported in this browser',
+                    deviceId: this._deviceId
+                });
+            });
+        } else {
+            log.info('[BLE] Web Bluetooth API not supported, using Scratch Link');
+            this._useScratchLink();
+        }
+    }
+
+    static _isWebBluetoothSupported () {
+        return typeof navigator !== 'undefined' &&
+            navigator.bluetooth &&
+            typeof navigator.bluetooth.requestDevice === 'function';
+    }
+
+    _tryWebBluetooth () {
+        const webBLE = new WebBLE(
+            this._runtime, this._deviceId, this._peripheralOptions,
+            this._connectCallback, this._resetCallback,
+            {
+                onUnexpectedDisconnect: this._onUnexpectedDisconnect,
+                forceChooser: this._forceChooser
+            }
+        );
+        // Set backend immediately so connectPeripheral can find it
+        // after PERIPHERAL_LIST_UPDATE is emitted
+        this._backend = webBLE;
+
+        webBLE.requestPeripheral()
+            .then(() => {
+                log.info('[BLE] Web Bluetooth device selected, backend ready');
+            })
+            .catch(e => {
+                if (this._webOnly) {
+                    this._backend = null;
+                    this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
+                        message: (e && e.message) || 'No Bluetooth device selected',
+                        deviceId: this._deviceId
+                    });
+                    return;
+                }
+                log.info('[BLE] Web Bluetooth cancelled or denied:', e, ', falling back to Scratch Link');
+                // User cancelled or permission denied, fall back to Scratch Link
+                this._useScratchLink();
+            });
+    }
+
+    _useScratchLink () {
+        log.info('[BLE] Initializing Scratch Link backend');
+        this._backend = new ScratchLinkBLE(
+            this._runtime, this._deviceId, this._peripheralOptions,
+            this._connectCallback, this._resetCallback
+        );
+    }
+
+    requestPeripheral () {
+        log.info('[BLE] requestPeripheral, backend:', this._backend ? this._backend.constructor.name : 'null');
+        if (this._backend) {
+            this._backend.requestPeripheral();
+        }
+    }
+
+    connectPeripheral (id, options = {}) {
+        const backendName = this._backend ? this._backend.constructor.name : 'null';
+        log.info('[BLE] connectPeripheral, id:', id, ', backend:', backendName);
+        if (this._backend) {
+            return this._backend.connectPeripheral(id, options);
+        }
+        log.error('[BLE] connectPeripheral called but no backend available');
+        return options.silent ? Promise.reject(new Error('No BLE backend')) : Promise.resolve(false);
+    }
+
+    expectDisconnect () {
+        if (this._backend && typeof this._backend.expectDisconnect === 'function') {
+            this._backend.expectDisconnect();
+        }
+    }
+
+    disconnect (options = {}) {
+        if (this._backend) {
+            this._backend.disconnect(options);
+        }
+    }
+
+    isConnected () {
+        return this._backend ? this._backend.isConnected() : false;
+    }
+
+    startNotifications (serviceId, characteristicId, onCharacteristicChanged = null) {
+        if (this._backend) {
+            return this._backend.startNotifications(serviceId, characteristicId, onCharacteristicChanged);
+        }
+        return Promise.reject(new Error('No BLE backend'));
+    }
+
+    read (serviceId, characteristicId, optStartNotifications = false, onCharacteristicChanged = null) {
+        if (this._backend) {
+            return this._backend.read(serviceId, characteristicId, optStartNotifications, onCharacteristicChanged);
+        }
+        return Promise.reject(new Error('No BLE backend'));
+    }
+
+    write (serviceId, characteristicId, message, encoding = null, withResponse = null) {
+        if (this._backend) {
+            return this._backend.write(serviceId, characteristicId, message, encoding, withResponse);
+        }
+        return Promise.reject(new Error('No BLE backend'));
+    }
+
+    handleDisconnectError (e) {
+        if (this._backend) {
+            this._backend.handleDisconnectError(e);
+        }
+    }
+}
+
 module.exports = BLE;
+// Exposed for unit tests of the chooser-free reconnect logic.
+module.exports.WebBLE = WebBLE;

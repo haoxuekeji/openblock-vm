@@ -1,15 +1,44 @@
 const fetch = require('node-fetch');
 const loadjs = require('loadjs');
 const formatMessage = require('format-message');
+const validUrl = require('valid-url');
 
 const dispatch = require('../dispatch/central-dispatch');
 const log = require('../util/log');
 const maybeFormatMessage = require('../util/maybe-format-message');
 
 const BlockType = require('./block-type');
+const {
+    normalizeDeviceDescriptors
+} = require('./device-descriptor');
 
-// Local resources server address
+// Local resources server address, used as fallback when no static
+// resources snapshot is deployed next to the GUI.
 const localResourcesServerUrl = 'http://127.0.0.1:20112/';
+
+/**
+ * Candidate base urls for the external resources, tried in order:
+ * 1. A static snapshot deployed with the GUI (set through the global
+ *    `window.OpenBlockExternalResourcesBase`, e.g. '/external-resources/'),
+ *    which requires no local service at all.
+ * 2. The local openblock-resource server (OpenBlock Link / desktop setup).
+ * @returns {Array.<string>} - the base urls to try.
+ */
+const getResourcesBaseCandidates = () => {
+    const candidates = [];
+    if (typeof window !== 'undefined' && window.OpenBlockExternalResourcesBase) {
+        candidates.push(window.OpenBlockExternalResourcesBase);
+    }
+    candidates.push(localResourcesServerUrl);
+    return candidates;
+};
+
+/**
+ * Builtin scratch extensions that drive the camera through ioDevices.video.
+ * Used to shut the shared video feed down when the last of them is unloaded.
+ * @type {Array.<string>}
+ */
+const VIDEO_SENSING_EXTENSIONS = ['videoSensing', 'mlClassifier', 'bodySensing'];
 
 // These extensions are currently built into the VM repository but should not be loaded at startup.
 // TODO: move these out into a separate repository?
@@ -26,6 +55,12 @@ const builtinExtensions = {
     translate: () => require('../extensions/scratch3_translate'),
     videoSensing: () => require('../extensions/scratch3_video_sensing'),
     makeymakey: () => require('../extensions/scratch3_makeymakey'),
+    mqtt: () => require('../extensions/scratch3_mqtt'),
+    speak: () => require('../extensions/scratch3_speak'),
+    asr: () => require('../extensions/scratch3_asr'),
+    aiChat: () => require('../extensions/scratch3_aichat'),
+    mlClassifier: () => require('../extensions/scratch3_ml_classifier'),
+    bodySensing: () => require('../extensions/scratch3_body_sensing'),
 
     wedo2: () => require('../extensions/scratch3_wedo2'),
     microbit: () => require('../extensions/scratch3_microbit'),
@@ -33,6 +68,13 @@ const builtinExtensions = {
     boost: () => require('../extensions/scratch3_boost'),
     gdxfor: () => require('../extensions/scratch3_gdx_for'),
     que: () => require('../extensions/scratch3_que/index.js')
+};
+
+const legacyDeviceTransports = {
+    microPythonEsp32Ble: {deviceId: 'microPythonEsp32', transport: 'webble'},
+    microPythonEsp32WebSerial: {deviceId: 'microPythonEsp32', transport: 'webserial'},
+    microPythonEsp32C3Ble: {deviceId: 'microPythonEsp32C3', transport: 'webble'},
+    microPythonEsp32C3WebSerial: {deviceId: 'microPythonEsp32C3', transport: 'webserial'}
 };
 
 const builtinDevices = {
@@ -46,8 +88,20 @@ const builtinDevices = {
     makeyMakey: () => require('../devices/arduinoLeonardo/makeyMakey'),
     // Arduino Mega2560
     arduinoMega2560: () => require('../devices/arduinoMega2560/arduinoMega2560'),
+    // Arduino Uno R4 Minima
+    arduinoUnoR4Minima: () => require('../devices/arduinoUnoR4Minima/arduinoUnoR4Minima'),
+    // Arduino Uno R4 WiFi
+    arduinoUnoR4Wifi: () => require('../devices/arduinoUnoR4Wifi/arduinoUnoR4Wifi'),
     // Esp32
     arduinoEsp32: () => require('../devices/arduinoEsp32/arduinoEsp32'),
+    microPythonEsp32: () => require('../devices/microPythonEsp32/microPythonEsp32'),
+    microPythonEsp32Ble: () => require('../devices/microPythonEsp32Ble/microPythonEsp32Ble'),
+    microPythonEsp32WebSerial: () => require('../devices/microPythonEsp32WebSerial/microPythonEsp32WebSerial'),
+    microPythonEsp32C3: () => require('../devices/microPythonEsp32C3/microPythonEsp32C3'),
+    microPythonEsp32C3Ble: () => require('../devices/microPythonEsp32C3Ble/microPythonEsp32C3Ble'),
+    microPythonEsp32C3WebSerial: () => require('../devices/microPythonEsp32C3WebSerial/microPythonEsp32C3WebSerial'),
+    // Esp32-S3
+    arduinoEsp32S3: () => require('../devices/arduinoEsp32S3/arduinoEsp32S3'),
     // Esp8266
     arduinoEsp8266: () => require('../devices/arduinoEsp8266/arduinoEsp8266'),
     arduinoEsp8266NodeMCU: () => require('../devices/arduinoEsp8266/arduinoEsp8266NodeMCU'),
@@ -57,6 +111,12 @@ const builtinDevices = {
     arduinoK210Maixduino: () => require('../devices/arduinoK210/arduinoK210Maixduino'),
     // Raspberry Pi Pico
     arduinoRaspberryPiPico: () => require('../devices/arduinoRaspberryPiPico/arduinoRaspberryPiPico'),
+    // Raspberry Pi Pico W
+    arduinoRaspberryPiPicoW: () => require('../devices/arduinoRaspberryPiPicoW/arduinoRaspberryPiPicoW'),
+    // Raspberry Pi Pico 2
+    arduinoRaspberryPiPico2: () => require('../devices/arduinoRaspberryPiPico2/arduinoRaspberryPiPico2'),
+    // Raspberry Pi Pico 2W
+    arduinoRaspberryPiPico2W: () => require('../devices/arduinoRaspberryPiPico2W/arduinoRaspberryPiPico2W'),
     // Microbit
     microbit: () => require('../devices/microbit/microbit'),
     microbitV2: () => require('../devices/microbit/microbitV2')
@@ -103,6 +163,227 @@ const builtinDevices = {
  * @property {Function} reject - function to call on failed worker startup
  */
 
+/**
+ * Score a device entry for library display preference.
+ * Higher score wins; Arduino variants beat MicroPython / base entries.
+ * @param {object} device - device index entry
+ * @returns {number} preference score
+ */
+const deviceFrameworkScore = device => {
+    const frameworks = []
+        .concat(device.frameworks || [])
+        .concat(device.typeList || [])
+        .map(item => String(item).toLowerCase());
+    const deviceId = String(device.deviceId || '').toLowerCase();
+    if (frameworks.indexOf('arduino') !== -1 || deviceId.indexOf('arduino') !== -1) {
+        return 3;
+    }
+    if (frameworks.indexOf('micropython') !== -1 || deviceId.indexOf('micropython') !== -1) {
+        return 2;
+    }
+    return 1;
+};
+
+/**
+ * Pick the library representative for an explicit parentDeviceId group.
+ * @param {Array.<object>} members - base + framework variants
+ * @param {string} parentId - shared parent device id
+ * @returns {object|null} representative entry, or null when the group should be hidden
+ */
+const pickExplicitDeviceRepresentative = (members, parentId) => {
+    if (!members || members.length === 0) {
+        return null;
+    }
+    const base = members.find(item => item.deviceId === parentId) || null;
+    const variants = members.filter(item => item.deviceId !== parentId);
+    const candidates = variants.length > 0 ? variants : members;
+    const ranked = candidates.slice().sort((left, right) =>
+        deviceFrameworkScore(right) - deviceFrameworkScore(left));
+    const representative = Object.assign({}, ranked[0]);
+
+    // Keep multi-framework UI metadata from the base entry when present.
+    if (base) {
+        if (base.typeList) {
+            representative.typeList = base.typeList;
+        }
+        if (base.frameworks) {
+            representative.frameworks = base.frameworks;
+        }
+        if (base.name && !representative.name) {
+            representative.name = base.name;
+        }
+        if (base.description && !representative.description) {
+            representative.description = base.description;
+        }
+        if (base.iconURL && (!representative.iconURL || representative.hide)) {
+            representative.iconURL = base.iconURL;
+            representative.connectionIconURL = base.connectionIconURL || representative.connectionIconURL;
+            representative.connectionSmallIconURL =
+                base.connectionSmallIconURL || representative.connectionSmallIconURL;
+        }
+    }
+
+    // Mirror legacy external-device rules for third-party entries.
+    if ((representative.deviceId.indexOf('_') === -1) && !!representative.name) {
+        return null;
+    }
+    return representative;
+};
+
+/**
+ * Legacy multi-framework collapse based on deviceId naming and list order.
+ * Kept for indexes that do not yet declare parentDeviceId / frameworks.
+ * @param {Array.<object>} devices - raw device index entries
+ * @returns {Array.<object>} filtered devices for the library
+ */
+const filterExternalDevicesLegacy = devices => {
+    const filteredDevices = [];
+    let currentBases = 'none';
+
+    devices.forEach(dev => {
+        // Filter out devices that are not inherited but have multiple programming
+        // frameworks, and only keep devices with the Arduino framework
+        const deviceId = dev.deviceId;
+        if (!deviceId.startsWith('arduino') && !deviceId.startsWith('microPython')) {
+            currentBases = deviceId;
+            filteredDevices.push(dev);
+        } else if (deviceId.indexOf(currentBases.charAt(0).toUpperCase() +
+            currentBases.slice(1)) === -1) {
+            currentBases = deviceId;
+            filteredDevices.push(dev);
+        } else if (deviceId.startsWith('arduino')) {
+            filteredDevices.pop();
+            filteredDevices.push(dev);
+        }
+    });
+
+    return filteredDevices.filter(dev => {
+        // Filter out external non-inherited devices
+        if ((dev.deviceId.indexOf('_') === -1) && (!!dev.name)) {
+            return false;
+        }
+
+        // Filter out devices that are inherited but have multiple programming
+        // frameworks, and only keep devices with the Arduino framework
+        if ((dev.deviceId.indexOf('_') !== -1) && !!dev.typeList &&
+            (dev.deviceId.indexOf('arduino') === -1)) {
+            return false;
+        }
+        return true;
+    });
+};
+
+/**
+ * Collapse multi-framework device variants into one library entry.
+ * Prefer explicit `parentDeviceId` / `frameworks`; fall back to legacy heuristics.
+ * @param {Array.<object>} devices - raw device index entries
+ * @returns {Array.<object>} filtered devices for the library
+ */
+const filterExternalDevices = devices => {
+    if (!Array.isArray(devices)) {
+        return [];
+    }
+
+    // Normalize declarative metadata before merging / filtering.
+    devices = normalizeDeviceDescriptors(devices);
+
+    const parentIds = new Set();
+    devices.forEach(dev => {
+        if (dev && dev.parentDeviceId) {
+            parentIds.add(dev.parentDeviceId);
+        }
+    });
+
+    const isExplicit = dev =>
+        !!(dev && dev.deviceId && (dev.parentDeviceId || parentIds.has(dev.deviceId)));
+
+    if (parentIds.size === 0) {
+        return filterExternalDevicesLegacy(devices);
+    }
+
+    const groups = new Map();
+    const legacyDevices = [];
+    devices.forEach(dev => {
+        if (!dev || !dev.deviceId) {
+            return;
+        }
+        if (isExplicit(dev)) {
+            const parentId = dev.parentDeviceId || dev.deviceId;
+            if (!groups.has(parentId)) {
+                groups.set(parentId, []);
+            }
+            groups.get(parentId).push(dev);
+        } else {
+            legacyDevices.push(dev);
+        }
+    });
+
+    const explicitReps = new Map();
+    groups.forEach((members, parentId) => {
+        const representative = pickExplicitDeviceRepresentative(members, parentId);
+        if (representative) {
+            explicitReps.set(parentId, representative);
+        }
+    });
+
+    const legacyFiltered = filterExternalDevicesLegacy(legacyDevices);
+
+    // Preserve original index order: emit each explicit group once at first sight,
+    // and emit legacy survivors when their (possibly replaced) id is reached.
+    const emittedGroups = new Set();
+    const emittedLegacy = new Set();
+    const result = [];
+
+    devices.forEach(dev => {
+        if (!dev || !dev.deviceId) {
+            return;
+        }
+        if (isExplicit(dev)) {
+            const parentId = dev.parentDeviceId || dev.deviceId;
+            if (emittedGroups.has(parentId)) {
+                return;
+            }
+            emittedGroups.add(parentId);
+            const representative = explicitReps.get(parentId);
+            if (representative) {
+                result.push(representative);
+            }
+            return;
+        }
+
+        // Legacy path may replace a base entry with an Arduino variant that
+        // appears later. Emit when we first encounter any member that maps to
+        // a surviving filtered id, without duplicating.
+        const legacyMatch = legacyFiltered.find(item => {
+            if (emittedLegacy.has(item.deviceId)) {
+                return false;
+            }
+            // Same entry
+            if (item.deviceId === dev.deviceId) {
+                return true;
+            }
+            // Arduino variant that replaced this base under the legacy heuristic
+            const baseSuffix = `${dev.deviceId.charAt(0).toUpperCase()}${dev.deviceId.slice(1)}`;
+            return item.deviceId.indexOf(baseSuffix) !== -1 &&
+                item.deviceId.startsWith('arduino');
+        });
+        if (legacyMatch) {
+            emittedLegacy.add(legacyMatch.deviceId);
+            result.push(legacyMatch);
+        }
+    });
+
+    // Any legacy survivors not yet emitted (e.g. order edge cases) append in
+    // filter order so nothing is silently dropped.
+    legacyFiltered.forEach(dev => {
+        if (!emittedLegacy.has(dev.deviceId)) {
+            result.push(dev);
+        }
+    });
+
+    return result;
+};
+
 class ExtensionManager {
     constructor(runtime) {
         /**
@@ -126,6 +407,12 @@ class ExtensionManager {
         this.pendingWorkers = [];
 
         /**
+         * Map of scratch extensions that can be loaded.
+         * @type {Array.<Extensions>}
+         */
+        this._extensionsList = [];
+
+        /**
          * Set of loaded extension URLs/IDs (equivalent for built-in extensions).
          * @type {Set.<string>}
          * @private
@@ -140,10 +427,10 @@ class ExtensionManager {
         this._loadedDevice = new Map();
 
         /**
-         * Map of extensions.
+         * Map of device extensions that can be loaded.
          * @type {Array.<DeviceExtensions>}
          */
-        this._deviceExtensions = [];
+        this._deviceExtensionsList = [];
 
         /**
          * Keep a reference to the runtime so we can construct internal extension objects.
@@ -177,6 +464,35 @@ class ExtensionManager {
      */
     isDeviceLoaded(deviceID) {
         return this._loadedDevice.has(deviceID);
+    }
+
+    /**
+     * Get extensions list from local server.
+     * @param {string} extensions - raw extensions data
+     * @returns {Promise} resolved extension list has been fetched or failure
+     */
+    getExtensionsList (extensions) {
+        return new Promise(resolve => {
+            const processedExtensions = extensions.map(extension => {
+                if (this.isExtensionLoaded(extension.extensionId)) {
+                    extension.isLoaded = true;
+                } else {
+                    extension.isLoaded = false;
+                }
+                return extension;
+            });
+
+            return resolve(processedExtensions);
+        });
+    }
+
+    /**
+     * Check whether an extension ID matches a built-in scratch extension.
+     * @param {string} extensionId - the ID to look up
+     * @returns {boolean} true if the ID matches a built-in extension
+     */
+    isBuiltinExtension (extensionId) {
+        return builtinExtensions.hasOwnProperty(extensionId);
     }
 
     /**
@@ -236,23 +552,119 @@ class ExtensionManager {
     }
 
     /**
-     * Get unbuild-in devices list from local server.
+     * Unload an extension by URL or internal extension ID
+     * @param {string} extensionURL - the URL for the extension to load OR the ID of an internal extension
+     */
+    unloadExtension (extensionURL) {
+        const serviceName = this._loadedExtensions.get(extensionURL);
+        if (serviceName) {
+            this._disposeExtensionService(serviceName);
+        }
+        this._loadedExtensions.delete(extensionURL);
+        this.runtime.removeScratchExtension(extensionURL);
+        this._disableVideoIfUnused();
+    }
+
+    /**
+     * Unload all extension
+     */
+    clearExtensions () {
+        this._loadedExtensions.forEach(serviceName => this._disposeExtensionService(serviceName));
+        this._loadedExtensions.clear();
+        this.runtime.clearScratchExtension();
+        this._disableVideoIfUnused();
+    }
+
+    /**
+     * Let an internal extension instance release whatever it holds (camera
+     * loops, ML models, runtime listeners) and drop it from the dispatch
+     * service table. Without this, unloaded extensions kept running their
+     * detection loops against the live camera forever.
+     * @param {string} serviceName - the dispatch service name of the extension.
+     * @private
+     */
+    _disposeExtensionService (serviceName) {
+        const serviceObject = dispatch.services[serviceName];
+        if (serviceObject && typeof serviceObject.dispose === 'function') {
+            try {
+                serviceObject.dispose();
+            } catch (e) {
+                log.warn(`Error disposing extension service ${serviceName}: ${e}`);
+            }
+            delete dispatch.services[serviceName];
+        }
+    }
+
+    /**
+     * Turn the camera feed off once no loaded extension uses it any more.
+     * The video device is shared between the video sensing style extensions;
+     * none of them owns it, so the manager decides when the last user is
+     * gone. Otherwise removing the extension left the camera (and its
+     * on-stage preview) running with no block left in the toolbox to stop it.
+     * @private
+     */
+    _disableVideoIfUnused () {
+        const stillUsed = VIDEO_SENSING_EXTENSIONS.some(id => this._loadedExtensions.has(id));
+        if (stillUsed) return;
+        const video = this.runtime.ioDevices && this.runtime.ioDevices.video;
+        if (video) {
+            video.disableVideo();
+        }
+    }
+
+    /**
+     * Fetch a resource index (devices or extensions) trying the static
+     * snapshot first and the local resource server as fallback, with a
+     * fallback to the english index when the current locale has none.
+     * The base url that served the index is remembered so relative urls
+     * inside it can be resolved later.
+     * @param {string} type - 'devices' or 'extensions'.
+     * @returns {Promise} resolves {base, data} or rejects when nothing answered.
+     * @private
+     */
+    _fetchResourceIndex (type) {
+        const locale = formatMessage.setup().locale;
+        const tryFetch = (base, loc) => fetch(`${base}${type}/${loc}.json`)
+            .then(response => {
+                if (response.ok === false) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                this._resourcesBase = base;
+                return {base, data};
+            });
+
+        let chain = Promise.reject(new Error('no resources base'));
+        getResourcesBaseCandidates().forEach(base => {
+            chain = chain
+                .catch(() => tryFetch(base, locale));
+            if (locale !== 'en') {
+                chain = chain.catch(() => tryFetch(base, 'en'));
+            }
+        });
+        return chain;
+    }
+
+/**
+     * Get unbuild-in devices list from static resources or local server.
      * @returns {Promise} resolved devices list has been fetched or failure
      */
     getDeviceList() {
         return new Promise(resolve => {
-            fetch(`${localResourcesServerUrl}devices/${formatMessage.setup().locale}.json`)
-                .then(response => response.json())
-                .then(devices => {
-                    devices = devices.map(dev => {
-                        dev.iconURL = localResourcesServerUrl + dev.iconURL;
-                        dev.connectionIconURL = localResourcesServerUrl + dev.connectionIconURL;
-                        dev.connectionSmallIconURL = localResourcesServerUrl + dev.connectionSmallIconURL;
+            this._fetchResourceIndex('devices')
+                .then(({base, data}) => {
+                    const devices = filterExternalDevices(data).map(dev => {
+                        dev.hide = false;
+                        dev.iconURL = base + dev.iconURL;
+                        dev.connectionIconURL = base + dev.connectionIconURL;
+                        dev.connectionSmallIconURL = base + dev.connectionSmallIconURL;
                         return dev;
                     });
                     return resolve(devices);
                 }, err => {
-                    log.warn(`Can not fetch data from local device server: ${err}`);
+                    log.warn(`Can not fetch external devices resource: ${err}`);
                     return resolve();
                 });
         });
@@ -261,17 +673,27 @@ class ExtensionManager {
 
     /**
      * Load an device by URL or internal device ID
-     * @param {string} deviceId - the URL for the device to load OR the ID of an internal device
-     * @param {string} deviceType - the type of device
-     * @param {Array.<string>} pnpidList - the array of pnpid list
+     * @param {object} device - the device to be load
      * @returns {Promise} resolved once the device is loaded and initialized or rejected on failure
      */
-    loadDeviceURL(deviceId, deviceType, pnpidList) {
+    loadDeviceURL (device) {
         // if no deviceid return
-        if (deviceId === 'null') {
+        if (device.deviceId === 'null') {
             this.clearDevice();
             return Promise.resolve();
         }
+
+        // Projects created before multi-transport devices stored the transport
+        // in the device id. Load them as the canonical board and restore the
+        // equivalent transport, so the next save automatically migrates them.
+        let transport = device.transport || null;
+        const legacy = legacyDeviceTransports[device.deviceId];
+        if (legacy) {
+            device = Object.assign({}, device, {deviceId: legacy.deviceId});
+            transport = legacy.transport;
+        }
+
+        const {deviceId, type, pnpidList} = device;
 
         const realDeviceId = this.runtime.analysisRealDeviceId(deviceId);
 
@@ -283,23 +705,23 @@ class ExtensionManager {
             }
 
             // Try to disconnect the old device before change device.
-            this.runtime.disconnectPeripheral(this.runtime.getDeviceId());
+            this.runtime.disconnectPeripheral(this.runtime.getDevice().deviceId);
 
-            this.runtime.setDeviceId(deviceId);
-            this.runtime.setDeviceType(deviceType);
-            this.runtime.setPnpIdList(pnpidList);
+            this.runtime.setDevice({deviceId: deviceId, type: type, pnpIdList: pnpidList});
             this.runtime.clearMonitor();
-            const device = builtinDevices[realDeviceId]();
-            const deviceInstance = new device(this.runtime, deviceId);
+            const dev = builtinDevices[realDeviceId]();
+            const deviceInstance = new dev(this.runtime, deviceId);
+            if (transport) {
+                this.runtime.setPeripheralTransport(deviceId, transport);
+            }
             const serviceName = this._registerInternalExtension(deviceInstance);
             this._loadedDevice.clear();
 
             this._loadedDevice.set(deviceId, serviceName);
 
             // Clear current extentions.
-            this.runtime.clearScratchExtension();
-            this._loadedExtensions.clear();
-            this.unloadAllDeviceExtension();
+            this.clearExtensions();
+            this.clearDeviceExtension();
 
             return Promise.resolve();
         }
@@ -311,44 +733,54 @@ class ExtensionManager {
      * Clear curent device
      */
     clearDevice () {
-        this.runtime.disconnectPeripheral(this.runtime.getDeviceId());
+        if (this.runtime.getDevice().deviceId) {
+            this.runtime.disconnectPeripheral(this.runtime.getDevice().deviceId);
 
-        const deviceId = this.runtime.getDeviceId();
+            const deviceId = this.runtime.getDevice().deviceId;
 
-        this.runtime.setDeviceId(null);
-        this.runtime.setDeviceType(null);
-        this.runtime.setPnpIdList([]);
-        this.runtime.clearMonitor();
-        this._loadedDevice.clear();
+            this.runtime.clearDevice();
+            this.runtime.clearMonitor();
+            this._loadedDevice.clear();
 
-        // Clear current extentions.
-        this.runtime.clearScratchExtension();
-        this._loadedExtensions.clear();
-        this.unloadAllDeviceExtension();
+            // Clear current extentions.
+            this.clearExtensions();
+            this.clearDeviceExtension();
 
-        this.runtime.emit(this.runtime.constructor.SCRATCH_EXTENSION_REMOVED, {deviceId});
+            this.runtime.emit(this.runtime.constructor.SCRATCH_EXTENSION_REMOVED, {deviceId});
+        }
     }
 
     /**
-     * Get device extensions list from local server.
+     * Get device extensions list from static resources or local server.
      * @returns {Promise} resolved extension list has been fetched or failure
      */
     getDeviceExtensionsList() {
         return new Promise(resolve => {
-            fetch(`${localResourcesServerUrl}extensions/${formatMessage.setup().locale}.json`)
-                .then(response => response.json())
-                .then(extensions => {
-                    extensions = extensions.map(extension => {
-                        extension.iconURL = localResourcesServerUrl + extension.iconURL;
+            this._fetchResourceIndex('extensions')
+                .then(({base, data}) => {
+                    let extensions = data;
+                    // filter unsupported distribution content
+                    let filteredExtensions = [];
+                    filteredExtensions = extensions.filter(extension => {
+                        // if the extension only has main.js but no blocks.js,
+                        // the plugin should be blocked
+                        if (!!extension.main && !extension.blocks) {
+                            return false;
+                        }
+                        return true;
+                    });
+
+                    extensions = filteredExtensions.map(extension => {
+                        extension.iconURL = base + extension.iconURL;
                         if (this.isDeviceExtensionLoaded(extension.extensionId)) {
                             extension.isLoaded = true;
                         }
                         return extension;
                     });
-                    this._deviceExtensions = extensions;
-                    return resolve(this._deviceExtensions);
+                    this._deviceExtensionsList = extensions;
+                    return resolve(this._deviceExtensionsList);
                 }, err => {
-                    log.warn(`Can not fetch data from local extension server: ${err}`);
+                    log.warn(`Can not fetch external extensions resource: ${err}`);
                     return resolve();
                 });
         });
@@ -370,37 +802,81 @@ class ExtensionManager {
      */
     loadDeviceExtension(deviceExtensionId) {
         return new Promise((resolve, reject) => {
-            const deviceExtension = this._deviceExtensions.find(ext => ext.extensionId === deviceExtensionId);
+            const deviceExtension = this._deviceExtensionsList.find(ext => ext.extensionId === deviceExtensionId);
             if (typeof deviceExtension === 'undefined') {
                 return reject(`Error while loadDeviceExtension device extension ` +
                     `can not find device extension: ${deviceExtensionId}`);
             }
 
-            const url = localResourcesServerUrl;
-            const toolboxUrl = url + deviceExtension.toolbox;
-            const blockUrl = url + deviceExtension.blocks;
-            const generatorUrl = url + deviceExtension.generator;
-            const msgUrl = url + deviceExtension.msg;
+            let registerUrls = [];
+
+            registerUrls.push(deviceExtension.toolbox);
+            registerUrls.push(deviceExtension.blocks);
+            registerUrls.push(deviceExtension.translations);
+            registerUrls.push(deviceExtension.generator);
+            registerUrls.push(deviceExtension.runtime);
+
+            // Remove null values
+            registerUrls = registerUrls.filter(url => url !== null && typeof url !== 'undefined' && url !== '');
+
+            // If it is a relative path, resolve it against the base url
+            // that served the extensions index.
+            const resourcesBase = this._resourcesBase || localResourcesServerUrl;
+            const resolveResourceUrl = url => {
+                if (!validUrl.isWebUri(url) && !url.startsWith('/')) {
+                    return resourcesBase + url;
+                }
+                return url;
+            };
+            const resourceVersion = deviceExtension.version ? encodeURIComponent(deviceExtension.version) : null;
+            const appendResourceVersion = url => {
+                if (!resourceVersion) return url;
+                const separator = url.indexOf('?') === -1 ? '?' : '&';
+                return `${url}${separator}v=${resourceVersion}`;
+            };
+            registerUrls = registerUrls.map(url => appendResourceVersion(resolveResourceUrl(url)));
 
             // clear global register before load external extension.
-            global.addToolbox = null;
             global.registerToolboxs = null;
-            global.addBlocks = null;
             global.registerBlocks = null;
-            global.addGenerator = null;
             global.registerGenerators = null;
-            global.addMsg = null;
-            global.registerMessages = null;
+            global.registerBlocksMessages = null;
+            global.registerDeviceExtensionRuntime = null;
 
-            loadjs([toolboxUrl, blockUrl, generatorUrl, msgUrl], {returnPromise: true})
+            // Library .py files a browser-direct uploader (Web Bluetooth /
+            // Web Serial) must install on the board along with the program.
+            const libraryFiles = (deviceExtension.libraryFiles || [])
+                .map(url => appendResourceVersion(resolveResourceUrl(url)));
+
+            loadjs(registerUrls, {returnPromise: true})
                 .then(() => {
-                    const getToolboxXML = global.registerToolboxs || global.addToolbox;
-                    this.runtime.addDeviceExtension(deviceExtensionId, getToolboxXML(), deviceExtension.library);
+                    const getToolboxXML = global.registerToolboxs;
+                    const realtimePrimitives = global.registerDeviceExtensionRuntime ?
+                        global.registerDeviceExtensionRuntime(this.runtime) : null;
+                    if (deviceExtension.runtime && !realtimePrimitives) {
+                        // A fetched runtime.js that never sets the global has
+                        // almost certainly died at parse time (e.g. top-level
+                        // const colliding with another extension's script).
+                        // Without this trace the extension loads fine but every
+                        // realtime block silently does nothing.
+                        log.error(`Device extension ${deviceExtension.extensionId} declares ` +
+                            `runtime "${deviceExtension.runtime}" but no realtime primitives were ` +
+                            `registered after loading it. Check the browser console for a syntax ` +
+                            `error in that script; its realtime blocks will do nothing.`);
+                    }
+                    this.runtime.addDeviceExtension(
+                        deviceExtensionId,
+                        getToolboxXML(),
+                        deviceExtension.library,
+                        libraryFiles,
+                        realtimePrimitives,
+                        deviceExtension.programMode
+                    );
 
                     const deviceExtensionsRegister = {
-                        defineBlocks: global.registerBlocks || global.addBlocks,
-                        defineGenerators: global.registerGenerators || global.addGenerator,
-                        defineMessages: global.registerMessages || global.addMsg
+                        defineBlocks: global.registerBlocks,
+                        defineGenerators: global.registerGenerators,
+                        defineMessages: global.registerBlocksMessages
                     };
 
                     this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_ADDED, deviceExtensionsRegister);
@@ -414,29 +890,20 @@ class ExtensionManager {
     /**
      * Unload an device extension by device extension ID
      * @param {string} deviceExtensionId - the ID of an device extension
-     * @returns {Promise} resolved once the device extension is unloaded or rejected on failure
      */
-    unloadDeviceExtension(deviceExtensionId) {
-        return new Promise(resolve => {
-            this.runtime.removeDeviceExtension(deviceExtensionId);
-            this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_REMOVED);
-            return resolve();
-        });
+    unloadDeviceExtension (deviceExtensionId) {
+        this.runtime.removeDeviceExtension(deviceExtensionId);
+        this.runtime.emit(this.runtime.constructor.DEVICE_EXTENSION_REMOVED);
     }
 
     /**
      * Unload all device extensions
-     * @returns {Promise} resolved once all device extensions is unloaded
      */
-    unloadAllDeviceExtension() {
-        const allPromises = [];
-
+    clearDeviceExtension () {
         const loadedDeviceExtensionId = this.runtime.getLoadedDeviceExtension();
         loadedDeviceExtensionId.forEach(id => {
-            allPromises.push(this.unloadDeviceExtension(id));
+            this.unloadDeviceExtension(id);
         });
-
-        return Promise.all(allPromises);
     }
 
     /**
@@ -464,9 +931,9 @@ class ExtensionManager {
      * @returns {Promise} resolved once all the extensions have been reinitialized
      */
     refreshBlocks () {
-        const loadedExtensionsAndDevice = Array.from(this._loadedExtensions.values())
+        const allServiceName = Array.from(this._loadedExtensions.values())
             .concat(Array.from(this._loadedDevice.values()));
-        const allPromises = loadedExtensionsAndDevice.map(serviceName =>
+        const allPromises = allServiceName.map(serviceName =>
             dispatch.call(serviceName, 'getInfo')
                 .then(info => {
                     info = this._prepareExtensionInfo(serviceName, info, this.getIdFromServiceName(serviceName));
@@ -579,7 +1046,7 @@ class ExtensionManager {
                 throw new Error('Invalid category id');
             }
             if (id.deviceId) {
-                category.id = `${this.runtime.getDeviceType()}_${category.id}`;
+                category.id = `${this.runtime.getDevice().type}_${category.id}`;
             }
             category.name = category.name || category.id;
             category.blocks = category.blocks || [];
@@ -749,3 +1216,5 @@ class ExtensionManager {
 }
 
 module.exports = ExtensionManager;
+module.exports.filterExternalDevices = filterExternalDevices;
+module.exports.filterExternalDevicesLegacy = filterExternalDevicesLegacy;

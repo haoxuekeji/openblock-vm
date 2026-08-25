@@ -35,7 +35,7 @@ const SERIAL_CONFIG = {
 const DIVECE_OPT = {
     type: 'arduino',
     fqbn: 'arduino:avr:nano:cpu=atmega328old',
-    firmware: 'arduinoUnoUltra.standardFirmata.ino.hex'
+    firmware: 'arduinoUnoUltra.hex'
 };
 
 const Pins = {

@@ -959,13 +959,17 @@ test('shareBlocksToTarget loads extensions that have not yet been loaded', t => 
 
     const fakeBlocks = [
         {opcode: 'loaded_fakeblock'},
-        {opcode: 'notloaded_fakeblock'}
+        {opcode: 'notloaded_fakeblock'},
+        // Device block opcode prefixes (e.g. `microPython`) are not builtin extensions
+        // and must not be loaded as extensions when sharing blocks between targets.
+        {opcode: 'microPython_pin_fakeblock'}
     ];
 
     // Stub the extension manager
     const loadedIds = [];
     vm.extensionManager = {
         isExtensionLoaded: id => id === 'loaded',
+        isBuiltinExtension: id => id === 'loaded' || id === 'notloaded',
         loadExtensionURL: id => new Promise(resolve => {
             loadedIds.push(id);
             resolve();

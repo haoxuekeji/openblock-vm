@@ -177,6 +177,15 @@ class ArduinoPeripheral{
     }
 
     /**
+     * Whether firmware flashing is actually supported on this channel.
+     * @return {boolean} - true, the Link server can flash the realtime
+     * (firmata) firmware for arduino type devices.
+     */
+    canUploadFirmware () {
+        return true;
+    }
+
+    /**
      * Called by the runtime when user wants to abort the uploading process.
      */
     abortUpload () {
@@ -444,7 +453,7 @@ class ArduinoPeripheral{
      */
     parsePin (pin) {
         if (pin.charAt(0) === 'A') {
-            return parseInt(pin.slice(1), 10) + 14;
+            return parseInt(pin.slice(1), 10) + this.numDigitalPins;
         }
         return parseInt(pin, 10);
     }
@@ -538,7 +547,7 @@ class ArduinoPeripheral{
         if (this.isReady()) {
             pin = this.parsePin(pin);
             // Shifting to analog pin number.
-            pin = pin - 14;
+            pin = pin - this.numDigitalPins;
             this._firmata.pinMode(pin, this._firmata.MODES.ANALOG);
             return new Promise(resolve => {
                 this._firmata.analogRead(pin, value => {

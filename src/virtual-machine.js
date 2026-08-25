@@ -160,6 +160,9 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_CONNECTION_LOST_ERROR, data =>
             this.emit(Runtime.PERIPHERAL_CONNECTION_LOST_ERROR, data)
         );
+        this.runtime.on(Runtime.PERIPHERAL_RECONNECTING, data =>
+            this.emit(Runtime.PERIPHERAL_RECONNECTING, data)
+        );
         this.runtime.on(Runtime.PERIPHERAL_REALTIME_CONNECTION_LOST_ERROR, data =>
             this.emit(Runtime.PERIPHERAL_REALTIME_CONNECTION_LOST_ERROR, data)
         );
@@ -184,6 +187,15 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted =>
             this.emit(Runtime.PERIPHERAL_UPLOAD_SUCCESS, aborted)
         );
+        this.runtime.on(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM, info => {
+            if (this.listenerCount(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM) === 0) {
+                // No UI is listening to ask the user, keep the legacy
+                // auto-flash behaviour instead of waiting forever.
+                info.respond(true);
+                return;
+            }
+            this.emit(Runtime.PERIPHERAL_UPLOAD_FIRMWARE_CONFIRM, info);
+        });
         this.runtime.on(Runtime.MIC_LISTENING, listening => {
             this.emit(Runtime.MIC_LISTENING, listening);
         });
@@ -299,6 +311,34 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Select the transport used by a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @param {string} transport - transport id.
+     * @return {?string} selected transport id.
+     */
+    setPeripheralTransport (extensionId, transport) {
+        return this.runtime.setPeripheralTransport(extensionId, transport);
+    }
+
+    /**
+     * Get the active transport of a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @return {?string} active transport id.
+     */
+    getPeripheralTransport (extensionId) {
+        return this.runtime.getPeripheralTransport(extensionId);
+    }
+
+    /**
+     * Get available transports of a logical multi-transport peripheral.
+     * @param {string} extensionId - the id of the device.
+     * @return {Array.<string>} supported transport ids.
+     */
+    getPeripheralTransports (extensionId) {
+        return this.runtime.getPeripheralTransports(extensionId);
+    }
+
+    /**
      * Tell the specified extension to scan for a peripheral.
      * @param {string} extensionId - the id of the extension.
      * @param {bool} listAll - wether list all connectable device.
@@ -344,6 +384,15 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * Hard reset the extension's connected peripheral.
+     * @param {string} extensionId - the id of the extension.
+     * @return {Promise<boolean>} - true when the transport supports it.
+     */
+    hardResetPeripheral (extensionId) {
+        return this.runtime.hardResetPeripheral(extensionId);
+    }
+
+    /**
      * Returns whether the extension has a currently connected peripheral.
      * @param {string} extensionId - the id of the extension.
      * @return {boolean} - whether the extension has a connected peripheral.
@@ -363,6 +412,47 @@ class VirtualMachine extends EventEmitter {
     }
 
     /**
+     * List files on the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} directory - board directory.
+     * @return {Promise<Array>}
+     */
+    listBoardFiles (extensionId, directory) {
+        return this.runtime.listBoardFiles(extensionId, directory);
+    }
+
+    /**
+     * Read a file from the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @return {Promise<object>}
+     */
+    readBoardFile (extensionId, filePath) {
+        return this.runtime.readBoardFile(extensionId, filePath);
+    }
+
+    /**
+     * Remove a file from the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @return {Promise<boolean>}
+     */
+    removeBoardFile (extensionId, filePath) {
+        return this.runtime.removeBoardFile(extensionId, filePath);
+    }
+
+    /**
+     * Write a file to the connected MicroPython board.
+     * @param {string} extensionId - device id.
+     * @param {string} filePath - board path.
+     * @param {string} contentBase64 - file content.
+     * @return {Promise<boolean>}
+     */
+    writeBoardFile (extensionId, filePath, contentBase64) {
+        return this.runtime.writeBoardFile(extensionId, filePath, contentBase64);
+    }
+
+    /**
      * Abort upload process.
      * @param {string} extensionId - the id of the extension.
      * @return {Function} Returns a function to aboart upload code to peripheral.
@@ -378,6 +468,16 @@ class VirtualMachine extends EventEmitter {
      */
     uploadFirmwareToPeripheral (extensionId) {
         return this.runtime.uploadFirmwareToPeripheral(extensionId);
+    }
+
+    /**
+     * Whether the extension's specified peripheral can actually flash
+     * firmware over its current connection transport.
+     * @param {string} extensionId - the id of the extension.
+     * @return {boolean} - true when uploadFirmware would really flash.
+     */
+    canUploadFirmwareToPeripheral (extensionId) {
+        return this.runtime.canUploadFirmwareToPeripheral(extensionId);
     }
 
     /**
@@ -583,22 +683,57 @@ class VirtualMachine extends EventEmitter {
             return Promise.reject('Unable to verify Scratch Project version.');
         };
         return deserializePromise()
-            // Step1: Install device first.
-            .then(({targets}) => {
+            .then(({targets, extensions}) => {
                 if (typeof performance !== 'undefined') {
                     performance.mark('scratch-vm-deserialize-end');
                     performance.measure('scratch-vm-deserialize',
                         'scratch-vm-deserialize-start', 'scratch-vm-deserialize-end');
                 }
-                return this.installDevice(targets, projectJSON.device, projectJSON.deviceType,
-                    projectJSON.pnpIdList, projectJSON.programMode, projectJSON.deviceExtensions);
-            })
-            // Step2: Install target and if there has deivce setting, set the editing target to stage incase there is
-            // device extensions block in sprite workspace, it will cause error.
-            .then(targets => this.installTargets(targets, projectJSON.extensions, true))
-            // Step3: Install device extension. it can get flyout blocks because the toolbox has been updated in the
-            // previous step. After loaded set the editing target to firset sprite if it has one.
-            .then(targets => this.installDeviceExtensions(projectJSON.deviceExtensions, targets));
+
+                let device = {};
+
+                // Since the new version of the project file incorporates the parameters of the device,
+                // if the device is found to be a string, it means that the project file is an old version
+                // of the project and needs to be read using the old method.
+                if (typeof projectJSON.device === 'string') {
+                    device.deviceId = projectJSON.device;
+                    device.type = projectJSON.deviceType;
+                    device.pnpIdList = projectJSON.pnpIdList;
+                } else if (typeof projectJSON.device === 'object' && projectJSON.device !== null) {
+                    device = projectJSON.device;
+                }
+
+                // Old sb2 projects have no top level `extensions` field, and sb3 files saved by
+                // upstream scratch may omit monitor-only extensions from it. Merge the explicit
+                // list with the extension ids collected by the deserializer. Only builtin ids or
+                // ids with an explicit URL are merged: opcode prefixes of device blocks (e.g.
+                // `arduinoUno`) must not be treated as loadable scratch extensions.
+                const projectExtensions = {
+                    extensionIDs: new Set(projectJSON.extensions || []),
+                    extensionURLs: (extensions && extensions.extensionURLs) || new Map()
+                };
+                if (extensions && extensions.extensionIDs) {
+                    extensions.extensionIDs.forEach(extensionID => {
+                        if (this.extensionManager.isBuiltinExtension(extensionID) ||
+                            projectExtensions.extensionURLs.has(extensionID)) {
+                            projectExtensions.extensionIDs.add(extensionID);
+                        }
+                    });
+                }
+
+                // Step1: Install device first.
+                return Promise.resolve(
+                    this.installDevice(targets, device, projectJSON.programMode, projectJSON.deviceExtensions)
+                )
+                    // Step2: Install target and if there has deivce setting, set the editing target to stage
+                    // incase there is device extensions block in sprite workspace, it will cause error.
+                    .then(installedTargets => this.installTargets(installedTargets, projectExtensions, true))
+                    // Step3: Install device extension. it can get flyout blocks because the toolbox has been
+                    // updated in the previous step. After loaded set the editing target to firset sprite if
+                    // it has one.
+                    .then(installedTargets =>
+                        this.installDeviceExtensions(projectJSON.deviceExtensions, installedTargets));
+            });
     }
 
     /**
@@ -655,20 +790,31 @@ class VirtualMachine extends EventEmitter {
     /**
      * Install `deserialize` results: device.
      * @param {Array.<Target>} targets - the targets to be installed
-     * @param {string} device - the deivce to be installed
-     * @param {string} deviceType - the type of deivce to be installed
-     * @param {Array.<string>} pnpIdList - the pnp id filter list of the device
-     * @param {string} programMode - the program mode
+     * @param {object} device - the device to be installed
+     * @param {string} [programMode] - the program mode saved in the project,
+     * 'realtime' or 'upload'. Missing in old project files.
      * @returns {Promise} Promise that resolves after all device extensions has loaded
      */
-    installDevice (targets, device = null, deviceType = null, pnpIdList = null, programMode = 'realtime') {
+    installDevice (targets, device, programMode) {
         targets = targets.filter(target => !!target);
 
-        if (device) {
-            this.runtime.setRealtimeMode(programMode === 'realtime');
+        if (device.deviceId) {
+            const explicitMode = programMode === 'realtime' || programMode === 'upload';
+            this.runtime.setRealtimeMode(programMode !== 'upload');
+            if (explicitMode) {
+                // Reopen the project in the mode it was saved in: the GUI
+                // consumes this one-shot flag when the device finishes
+                // loading and skips the defaultProgramMode override. Old
+                // files without the field keep the device default behavior.
+                this.runtime.markProgramModeRestored();
+            }
 
-            return this.extensionManager.loadDeviceURL(device, deviceType, pnpIdList)
-                .then(() => targets);
+            return this.extensionManager.loadDeviceURL(device)
+                .then(() => targets)
+                .catch(error => {
+                    this.runtime.consumeProgramModeRestored();
+                    throw error;
+                });
         }
         return targets;
     }
@@ -686,17 +832,22 @@ class VirtualMachine extends EventEmitter {
         if (extensions) {
             if (extensions.extensionIDs) {
                 extensions.extensionIDs.forEach(extensionID => {
-                    if (!this.extensionManager.isExtensionLoaded(extensionID)) {
-                        const extensionURL = extensions.extensionURLs.get(extensionID) || extensionID;
+                    if (this.extensionManager.isExtensionLoaded(extensionID)) return;
+                    // Deserialized extension ids collected from block opcodes may contain device
+                    // block prefixes (e.g. `microPython`), which are not loadable scratch
+                    // extensions. Only load builtin extensions or ones with an explicit URL.
+                    const extensionURL = extensions.extensionURLs.get(extensionID);
+                    if (extensionURL) {
                         allPromises.push(this.extensionManager.loadExtensionURL(extensionURL));
+                    } else if (this.extensionManager.isBuiltinExtension(extensionID)) {
+                        allPromises.push(this.extensionManager.loadExtensionURL(extensionID));
                     }
                 });
             } else {
                 extensions.forEach(extensionID => {
-                    if (!this.extensionManager.isExtensionLoaded(extensionID)) {
-                        // const extensionURL = extensions.extensionURLs.get(extensionID) || extensionID;
-                        const extensionURL = extensionID;
-                        allPromises.push(this.extensionManager.loadExtensionURL(extensionURL));
+                    if (!this.extensionManager.isExtensionLoaded(extensionID) &&
+                        this.extensionManager.isBuiltinExtension(extensionID)) {
+                        allPromises.push(this.extensionManager.loadExtensionURL(extensionID));
                     }
                 });
             }
@@ -1414,6 +1565,10 @@ class VirtualMachine extends EventEmitter {
             .map(b => sb3.getExtensionIdForOpcode(b.opcode))
             .filter(id => !!id) // Remove ids that do not exist
             .filter(id => !this.extensionManager.isExtensionLoaded(id)) // and remove loaded extensions
+            // Opcode prefixes of device blocks (e.g. `microPython`) are not loadable scratch
+            // extensions. Trying to load them would make the extension worker fetch a bogus
+            // relative URL and reject the whole copy. Same guard as in `loadProject`.
+            .filter(id => this.extensionManager.isBuiltinExtension(id))
         );
 
         // Create an array promises for extensions to load

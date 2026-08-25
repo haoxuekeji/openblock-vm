@@ -19,10 +19,17 @@ class Scratch3CoreExample {
     }
 
     /**
-     * @returns {object} metadata for this extension and its blocks.
+     * @return {string} - the ID of this extension.
+     */
+    get EXTENSION_ID () {
+        return 'coreExample';
+    }
+
+    /**
+     * @returns {Array.<object>} metadata for this extension and its blocks.
      */
     getInfo () {
-        return {
+        return [{
             id: 'coreExample',
             name: 'CoreEx', // This string does not need to be translated as this extension is only used as an example.
             blocks: [
@@ -48,7 +55,7 @@ class Scratch3CoreExample {
                     }
                 }
             ]
-        };
+        }];
     }
 
     /**

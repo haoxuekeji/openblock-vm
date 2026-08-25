@@ -39,7 +39,7 @@ const SERIAL_CONFIG = {
 const DIVECE_OPT = {
     type: 'arduino',
     fqbn: 'arduino:avr:mega:cpu=atmega2560',
-    firmware: 'arduinoMega2560.standardFirmata.ino.hex'
+    firmware: 'arduinoMega2560.hex'
 };
 
 const Pins = {
@@ -841,6 +841,8 @@ class OpenBlockArduinoMega2560Device {
 
         // Create a new Arduino mega 2560 peripheral instance
         this._peripheral = new ArduinoMega2560(this.runtime, this.DEVICE_ID, originalDeviceId);
+
+        this._peripheral.numDigitalPins = 54;
     }
 
     /**

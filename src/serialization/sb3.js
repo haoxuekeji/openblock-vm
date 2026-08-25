@@ -554,7 +554,7 @@ const serialize = function (runtime, targetId) {
 
     obj.monitors = serializeMonitors(runtime.getMonitorState());
 
-    obj.device = runtime.getDeviceId();
+    obj.device = runtime.getDevice();
 
     // If no device setting means this project is a pure scratch project, so we convert the procedures blocks which
     // is not supported by scratch3 to the types supported by scratch3, so that scratch3 can open the pure scratch
@@ -576,14 +576,10 @@ const serialize = function (runtime, targetId) {
         });
     }
 
-    obj.deviceType = runtime.getDeviceType();
-
-    obj.pnpIdList = runtime.getPnpIdList();
-
     obj.programMode = runtime.isRealtimeMode() ? 'realtime' : 'upload';
 
     // Assemble extension list
-    obj.extensions = runtime.getLoadedExtension();
+    obj.extensions = runtime.getLoadedScratchExtension();
 
     // Assemble device extension list
     obj.deviceExtensions = runtime.getLoadedDeviceExtension();
