@@ -76,11 +76,15 @@ class MicroPythonMultiTransportPeripheral {
             );
             break;
         case TRANSPORT_WEB_BLE:
+            // No webBluetoothOnly restriction: when the browser has no Web
+            // Bluetooth (http deployment, Firefox), the BLE facade falls
+            // back to the Link BLE endpoint (/scratch/ble) so the obble
+            // transport still works with only openblock-link installed.
             this._peripheral = new MicroPythonBlePeripheral(
                 this._runtime,
                 this._deviceId,
                 this._originalDeviceId,
-                {register: false, webBluetoothOnly: true}
+                {register: false}
             );
             break;
         case TRANSPORT_LINK:
