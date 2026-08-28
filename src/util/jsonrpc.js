@@ -98,7 +98,10 @@ class JSONRPC {
     _handleRequest (json) {
         const {method, params, id} = json;
         const rawResult = this.didReceiveCall(method, params);
-        if (id) {
+        // `id` may legitimately be 0 (e.g. the first request of an
+        // openblock-link session), so test for presence, not truthiness:
+        // dropping the response leaves the peer waiting forever.
+        if (id !== null && typeof id !== 'undefined') {
             Promise.resolve(rawResult).then(
                 result => {
                     this._sendResponse(id, result);
