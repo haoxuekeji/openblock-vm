@@ -33,32 +33,160 @@ const WEB_BLE_MEMORY_PREFIX = 'openblock.webble.last.';
 const autoReconnectBlocked = {};
 
 /**
- * Scratch Link based BLE backend using WebSocket + JSON-RPC.
- * This is the original implementation that communicates through Scratch Link.
+ * How long a silent reconnect waits for the board to advertise again
+ * after the Link session was reopened and a new discovery started.
+ * The obble firmware advertises fast for ~30s after a disconnect, and
+ * the owner retries the whole attempt several times.
+ * @readonly
+ */
+const SCRATCH_LINK_REDISCOVER_TIMEOUT = 10000;
+
+/**
+ * How long a silent reconnect waits for the notification setup in the
+ * connect callback before failing the attempt (mirrors the WebBLE
+ * silent notification setup bound: a half-open rx path must fail the
+ * attempt so the reconnect loop retries from a clean connection).
+ * @readonly
+ */
+const SCRATCH_LINK_NOTIFICATION_SETUP_TIMEOUT = 8000;
+
+/**
+ * Sentinel message used when rejecting requests stranded by a closed
+ * Link socket, so downstream handlers can tell this apart from a real
+ * request error reported by the server.
+ * @readonly
+ */
+const SCRATCH_LINK_SOCKET_CLOSED = 'OpenBlock Link socket closed';
+
+/**
+ * Scratch Link based BLE backend using WebSocket + JSON-RPC, served by
+ * openblock-link's /scratch/ble endpoint (or the official Scratch Link).
+ *
+ * Supports the same session semantics as the WebBLE backend so the
+ * MicroPython BLE peripheral works over it: connectPeripheral resolves a
+ * boolean and accepts {silent} for chooser-free reconnects (including
+ * reopening the websocket and rediscovering the board after a reboot),
+ * expectDisconnect() suppresses the connection-lost report of a planned
+ * board reboot, and an options.onUnexpectedDisconnect callback lets the
+ * owner drive automatic reconnects instead of surfacing the loss.
  */
 class ScratchLinkBLE extends JSONRPC {
-    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback) {
+    constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback, options = {}) {
         super();
-
-        this._socket = runtime.getScratchLinkSocket('BLE');
-        this._socket.setOnOpen(this.requestPeripheral.bind(this));
-        this._socket.setOnClose(this.handleDisconnectError.bind(this));
-        this._socket.setOnError(this._handleRequestError.bind(this));
-        this._socket.setHandleMessage(this._handleMessage.bind(this));
-
-        this._sendMessage = this._socket.sendMessage.bind(this._socket);
 
         this._availablePeripherals = {};
         this._connectCallback = connectCallback;
         this._connected = false;
         this._characteristicDidChangeCallback = null;
         this._resetCallback = resetCallback;
+        this._onUnexpectedDisconnect = options.onUnexpectedDisconnect || null;
         this._discoverTimeoutID = null;
         this._deviceId = deviceId;
         this._peripheralOptions = peripheralOptions;
         this._runtime = runtime;
 
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
+
+        /**
+         * Pending silent rediscovery, set while a silent reconnect waits
+         * for the target board to advertise again:
+         * {peripheralId, resolve, reject} (settling clears the field).
+         * Discovery events are not forwarded to the GUI while this is set.
+         * @type {?object}
+         */
+        this._pendingRediscover = null;
+
+        /**
+         * Pending socket reopen of a silent reconnect: {resolve, reject},
+         * settled by the shared socket handlers (cleared when settled).
+         * @type {?object}
+         */
+        this._pendingSocketOpen = null;
+
+        // Timeouts are injectable for unit tests only.
+        this._rediscoverTimeout = options.rediscoverTimeout || SCRATCH_LINK_REDISCOVER_TIMEOUT;
+        this._notificationSetupTimeout =
+            options.notificationSetupTimeout || SCRATCH_LINK_NOTIFICATION_SETUP_TIMEOUT;
+
+        this._socket = null;
+        this._attachSocket(runtime.getScratchLinkSocket('BLE'), this.requestPeripheral.bind(this));
         this._socket.open();
+    }
+
+    /**
+     * Wire a (new) Link socket to this session. Used for the initial
+     * connection and again when a silent reconnect replaces a socket the
+     * server closed after the board rebooted.
+     * @param {object} socket - a ScratchLinkSocket.
+     * @param {Function} onOpen - open handler for this socket.
+     * @private
+     */
+    _attachSocket (socket, onOpen) {
+        this._socket = socket;
+        this._sendMessage = socket.sendMessage.bind(socket);
+        socket.setOnOpen(onOpen);
+        socket.setOnClose(this._handleSocketClose.bind(this));
+        socket.setOnError(this._handleSocketError.bind(this));
+        socket.setHandleMessage(this._handleMessage.bind(this));
+    }
+
+    /**
+     * The Link socket closed: requests still on the wire will never be
+     * answered, so fail them, then treat the close like a connection loss.
+     * @private
+     */
+    _handleSocketClose () {
+        this._settlePendingSocketOpen(new Error(SCRATCH_LINK_SOCKET_CLOSED));
+        this._rejectOpenRequests(new Error(SCRATCH_LINK_SOCKET_CLOSED));
+        if (this._pendingRediscover) {
+            this._pendingRediscover.reject(new Error(SCRATCH_LINK_SOCKET_CLOSED));
+        }
+        this.handleDisconnectError();
+    }
+
+    _handleSocketError (e) {
+        if (this._pendingSocketOpen || this._pendingRediscover) {
+            // A silent reconnect attempt failed to reach the Link server;
+            // the owner's retry loop decides whether to report anything.
+            this._settlePendingSocketOpen(new Error(SCRATCH_LINK_SOCKET_CLOSED));
+            if (this._pendingRediscover) {
+                this._pendingRediscover.reject(new Error(SCRATCH_LINK_SOCKET_CLOSED));
+            }
+            return;
+        }
+        if (!this._silentConnect) {
+            this._handleRequestError(e);
+        }
+    }
+
+    /**
+     * Settle the pending socket reopen of a silent reconnect, if any.
+     * @param {?Error} error - reject with this error, or resolve when null.
+     * @private
+     */
+    _settlePendingSocketOpen (error) {
+        if (!this._pendingSocketOpen) return;
+        const pending = this._pendingSocketOpen;
+        this._pendingSocketOpen = null;
+        if (error) {
+            pending.reject(error);
+        } else {
+            pending.resolve();
+        }
+    }
+
+    /**
+     * Reject every JSON-RPC request that is still waiting for an answer.
+     * @param {Error} error - the rejection reason.
+     * @private
+     */
+    _rejectOpenRequests (error) {
+        const requests = this._openRequests;
+        this._openRequests = {};
+        Object.keys(requests).forEach(id => {
+            requests[id].reject(error);
+        });
     }
 
     requestPeripheral () {
@@ -69,33 +197,201 @@ class ScratchLinkBLE extends JSONRPC {
         this._discoverTimeoutID = window.setTimeout(this._handleDiscoverTimeout.bind(this), 15000);
         this.sendRemoteRequest('discover', this._peripheralOptions)
             .catch(e => {
+                // The socket error handler already reported unreachable
+                // Link servers; do not report the stranded request again.
+                if (e && e.message === SCRATCH_LINK_SOCKET_CLOSED) return;
                 this._handleRequestError(e);
             });
     }
 
-    connectPeripheral (id) {
-        this.sendRemoteRequest('connect', {peripheralId: id})
-            .then(() => {
-                this._connected = true;
-                this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
-                this._connectCallback();
+    /**
+     * Connect to a discovered peripheral.
+     *
+     * A silent connect (options.silent) is a chooser-free reconnect run by
+     * the owning peripheral after a board reboot or connection drop: no
+     * error events are emitted, failures reject so the caller's retry loop
+     * can count them, and a closed Link session is reopened (new socket +
+     * rediscovery) transparently.
+     * @param {string} id - the peripheral id from didDiscoverPeripheral.
+     * @param {object} options - {silent} see above.
+     * @return {Promise<boolean>} - true when connected and, for silent
+     *   connects, the notification setup completed.
+     */
+    connectPeripheral (id, options = {}) {
+        const silent = options.silent === true;
+        this._silentConnect = silent;
+
+        let flow;
+        if (silent) {
+            flow = this._silentConnectFlow(id);
+        } else {
+            flow = this.sendRemoteRequest('connect', {peripheralId: id})
+                .then(() => {
+                    this._connected = true;
+                    this._expectedDisconnect = false;
+                    this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
+                    this._connectCallback();
+                    return true;
+                });
+        }
+
+        return flow
+            .then(result => {
+                this._silentConnect = false;
+                return result;
             })
             .catch(e => {
+                this._silentConnect = false;
+                if (silent) {
+                    this._connected = false;
+                    throw e;
+                }
                 this._handleRequestError(e);
+                return false;
             });
     }
 
-    disconnect () {
-        if (this._connected) {
-            this._connected = false;
+    /**
+     * The silent reconnect flow: make sure a Link session exists and the
+     * board has been discovered in it, connect, then wait (bounded) for
+     * the notification setup so a half-open rx path fails the attempt.
+     * @param {string} id - the peripheral id.
+     * @return {Promise<boolean>} - resolves true when the channel is usable.
+     * @private
+     */
+    _silentConnectFlow (id) {
+        let ready;
+        if (this._socket.isOpen()) {
+            ready = Promise.resolve();
+        } else {
+            // The server closes the session socket when the peripheral
+            // drops (e.g. the board rebooted after an upload): open a
+            // fresh session and wait for the board to advertise again.
+            ready = this._reopenSocket().then(() => this._discoverTarget(id));
         }
+        return ready
+            .then(() => this.sendRemoteRequest('connect', {peripheralId: id})
+                .catch(e => {
+                    // The session is fresh or scanning stopped meanwhile:
+                    // "invalid peripheral ID" just means the board has to
+                    // be discovered (again) before connecting to it.
+                    if (e && /invalid peripheral/i.test(`${e.message}`)) {
+                        return this._discoverTarget(id)
+                            .then(() => this.sendRemoteRequest('connect', {peripheralId: id}));
+                    }
+                    throw e;
+                }))
+            .then(() => {
+                this._connected = true;
+                this._expectedDisconnect = false;
+                return this._runBoundedConnectCallback();
+            })
+            .then(() => {
+                this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
+                return true;
+            });
+    }
+
+    /**
+     * Open a new Link socket for this session, wired to the same shared
+     * handlers as the initial one.
+     * @return {Promise} - resolved once the socket is open.
+     * @private
+     */
+    _reopenSocket () {
+        return new Promise((resolve, reject) => {
+            this._pendingSocketOpen = {resolve, reject};
+            const socket = this._runtime.getScratchLinkSocket('BLE');
+            this._attachSocket(socket, () => {
+                this._settlePendingSocketOpen(null);
+            });
+            socket.open();
+        });
+    }
+
+    /**
+     * Start a discovery and wait for the target board to advertise.
+     * Discovery events are held back from the GUI while this runs (the
+     * GUI is showing the reconnecting state, not the scan list).
+     * @param {string} peripheralId - the board to wait for.
+     * @return {Promise} - resolved when the board was discovered.
+     * @private
+     */
+    _discoverTarget (peripheralId) {
+        return new Promise((resolve, reject) => {
+            let timer = null;
+            const pending = {peripheralId};
+            const settle = err => {
+                if (this._pendingRediscover === pending) {
+                    this._pendingRediscover = null;
+                }
+                window.clearTimeout(timer);
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve();
+                }
+            };
+            pending.resolve = () => settle(null);
+            pending.reject = err => settle(err);
+            this._pendingRediscover = pending;
+            timer = window.setTimeout(() => {
+                settle(new Error('Bluetooth device did not advertise again'));
+            }, this._rediscoverTimeout);
+
+            this.sendRemoteRequest('discover', this._peripheralOptions)
+                .catch(e => settle(e));
+        });
+    }
+
+    /**
+     * Run the connect callback (notification setup) with a time bound.
+     * @return {Promise} - resolved when the callback finished in time.
+     * @private
+     */
+    _runBoundedConnectCallback () {
+        return new Promise((resolve, reject) => {
+            let timer = window.setTimeout(() => {
+                timer = null;
+                reject(new Error('Bluetooth notification setup timed out'));
+            }, this._notificationSetupTimeout);
+            Promise.resolve()
+                .then(() => this._connectCallback())
+                .then(() => {
+                    if (timer === null) return;
+                    window.clearTimeout(timer);
+                    resolve();
+                }, e => {
+                    if (timer === null) return;
+                    window.clearTimeout(timer);
+                    reject(e);
+                });
+        });
+    }
+
+    /**
+     * Mark the next socket close as part of an intentional board reboot.
+     * This suppresses the normal connection-lost event while auto
+     * reconnect is in progress.
+     */
+    expectDisconnect () {
+        this._expectedDisconnect = true;
+    }
+
+    disconnect (options = {}) {
+        const silent = options === true || options.silent === true;
+        this._connected = false;
+        this._expectedDisconnect = false;
+        this._silentConnect = false;
         if (this._socket.isOpen()) {
             this._socket.close();
         }
         if (this._discoverTimeoutID) {
             window.clearTimeout(this._discoverTimeoutID);
         }
-        this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
+        if (!silent) {
+            this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
+        }
     }
 
     isConnected () {
@@ -136,6 +432,10 @@ class ScratchLinkBLE extends JSONRPC {
         return this.sendRemoteRequest('write', params)
             .catch(e => {
                 this.handleDisconnectError(e);
+                // Callers await their writes: propagate the failure so
+                // REPL flows fail fast instead of waiting for an answer
+                // to bytes that never reached the board.
+                throw e;
             });
     }
 
@@ -143,6 +443,14 @@ class ScratchLinkBLE extends JSONRPC {
         switch (method) {
         case 'didDiscoverPeripheral':
             this._availablePeripherals[params.peripheralId] = params;
+            if (this._pendingRediscover) {
+                // Silent reconnect in progress: wait for the target board,
+                // no scan list updates while the GUI shows "reconnecting".
+                if (params.peripheralId === this._pendingRediscover.peripheralId) {
+                    this._pendingRediscover.resolve();
+                }
+                break;
+            }
             this._runtime.emit(
                 this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
                 this._availablePeripherals
@@ -181,6 +489,20 @@ class ScratchLinkBLE extends JSONRPC {
 
     handleDisconnectError (/* e */) {
         if (!this._connected) return;
+        this._connected = false;
+        if (this._expectedDisconnect || this._silentConnect) {
+            // A planned board reboot (upload, hard reset) drops the link
+            // on purpose; the owner reconnects silently and reports the
+            // outcome itself.
+            this._expectedDisconnect = false;
+            return;
+        }
+        if (this._onUnexpectedDisconnect) {
+            // Hand the loss to the owner, which drives an automatic
+            // reconnect and reports it only when that fails.
+            this._onUnexpectedDisconnect();
+            return;
+        }
         this.disconnect();
         if (this._resetCallback) {
             this._resetCallback();
@@ -786,7 +1108,8 @@ class BLE {
         log.info('[BLE] Initializing Scratch Link backend');
         this._backend = new ScratchLinkBLE(
             this._runtime, this._deviceId, this._peripheralOptions,
-            this._connectCallback, this._resetCallback
+            this._connectCallback, this._resetCallback,
+            {onUnexpectedDisconnect: this._onUnexpectedDisconnect}
         );
     }
 
@@ -854,3 +1177,4 @@ class BLE {
 module.exports = BLE;
 // Exposed for unit tests of the chooser-free reconnect logic.
 module.exports.WebBLE = WebBLE;
+module.exports.ScratchLinkBLE = ScratchLinkBLE;
