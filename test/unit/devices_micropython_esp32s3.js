@@ -49,7 +49,12 @@ test('esp32-s3 pin menus follow the s3 gpio map', t => {
     t.notOk(pinValues.includes('26'), 'flash pins hidden');
     t.ok(pinValues.includes('0'));
     t.ok(pinValues.includes('21'));
-    t.ok(pinValues.includes('48') === false, 'pin list matches the arduino s3 board map');
+    // Strap pins stay hidden, but 47/48 are plain GPIOs: the onboard
+    // WS2812 of the common DevKitC-1 boards sits on GPIO48.
+    t.notOk(pinValues.includes('45'), 'GPIO45 (strap) hidden');
+    t.notOk(pinValues.includes('46'), 'GPIO46 (strap) hidden');
+    t.ok(pinValues.includes('47'), 'GPIO47 listed');
+    t.ok(pinValues.includes('48'), 'GPIO48 listed (onboard WS2812 on DevKitC-1)');
     t.ok(pinValues.includes('43'), 'UART0 TX listed like other chips');
     t.ok(pinValues.includes('44'), 'UART0 RX listed like other chips');
 

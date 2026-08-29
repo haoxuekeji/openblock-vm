@@ -34,9 +34,12 @@ const DIVECE_OPT = {
 
 /**
  * ESP32-S3 usable GPIO pins. GPIO22-25 do not exist, GPIO26-32 are used by
- * the internal flash (and GPIO33-34 by octal flash/PSRAM modules),
- * GPIO19/20 are the USB D-/D+ pins (native USB serial/JTAG, keep them free
- * so the Web Serial transport keeps working), GPIO43/44 are UART0 TX/RX.
+ * the internal flash (octal flash/PSRAM modules additionally claim
+ * GPIO33-37, so 35-37 are only usable on quad modules), GPIO19/20 are the
+ * USB D-/D+ pins (native USB serial/JTAG, keep them free so the Web Serial
+ * transport keeps working), GPIO43/44 are UART0 TX/RX, GPIO45/46 are strap
+ * pins. GPIO47/48 are listed because the onboard WS2812 of the common
+ * DevKitC-1 boards sits on GPIO48.
  */
 const Pins = {
     IO0: '0',
@@ -68,7 +71,9 @@ const Pins = {
     IO41: '41',
     IO42: '42',
     IO43: '43',
-    IO44: '44'
+    IO44: '44',
+    IO47: '47',
+    IO48: '48'
 };
 
 const PIN_MENU_ITEMS = Object.keys(Pins).map(key => ({
