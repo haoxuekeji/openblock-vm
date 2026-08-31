@@ -85,7 +85,6 @@ const builtinDevices = {
     arduinoUnoSE: () => require('../devices/arduinoUno/arduinoUnoSE'),
     // Arduino Leonardo
     arduinoLeonardo: () => require('../devices/arduinoLeonardo/arduinoLeonardo'),
-    makeyMakey: () => require('../devices/arduinoLeonardo/makeyMakey'),
     // Arduino Mega2560
     arduinoMega2560: () => require('../devices/arduinoMega2560/arduinoMega2560'),
     // Arduino Uno R4 Minima
@@ -106,18 +105,6 @@ const builtinDevices = {
     // Esp8266
     arduinoEsp8266: () => require('../devices/arduinoEsp8266/arduinoEsp8266'),
     arduinoEsp8266NodeMCU: () => require('../devices/arduinoEsp8266/arduinoEsp8266NodeMCU'),
-    // K210
-    arduinoK210: () => require('../devices/arduinoK210/arduinoK210'),
-    arduinoK210MaixDock: () => require('../devices/arduinoK210/arduinoK210MaixDock'),
-    arduinoK210Maixduino: () => require('../devices/arduinoK210/arduinoK210Maixduino'),
-    // Raspberry Pi Pico
-    arduinoRaspberryPiPico: () => require('../devices/arduinoRaspberryPiPico/arduinoRaspberryPiPico'),
-    // Raspberry Pi Pico W
-    arduinoRaspberryPiPicoW: () => require('../devices/arduinoRaspberryPiPicoW/arduinoRaspberryPiPicoW'),
-    // Raspberry Pi Pico 2
-    arduinoRaspberryPiPico2: () => require('../devices/arduinoRaspberryPiPico2/arduinoRaspberryPiPico2'),
-    // Raspberry Pi Pico 2W
-    arduinoRaspberryPiPico2W: () => require('../devices/arduinoRaspberryPiPico2W/arduinoRaspberryPiPico2W'),
     // Microbit
     microbit: () => require('../devices/microbit/microbit'),
     microbitV2: () => require('../devices/microbit/microbitV2')
