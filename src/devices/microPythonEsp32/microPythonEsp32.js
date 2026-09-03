@@ -646,6 +646,13 @@ class OpenBlockMicroPythonEsp32Device {
             SERIAL_CONFIG,
             this.DIVECE_OPT
         );
+
+        /**
+         * Last sampled level per pin, feeding the pin event hat.
+         * @type {Map.<string, string>}
+         * @private
+         */
+        this._pinHatLevels = new Map();
     }
 
     /**
@@ -686,6 +693,28 @@ class OpenBlockMicroPythonEsp32Device {
                 color3: '#3373CC',
 
                 blocks: [
+                    {
+                        opcode: 'whenPinLevel',
+                        text: formatMessage({
+                            id: 'microPythonEsp32.pins.whenPinLevel',
+                            default: 'when pin [PIN] becomes [LEVEL]',
+                            description: 'microPythonEsp32 when pin level event hat'
+                        }),
+                        blockType: BlockType.HAT,
+                        arguments: {
+                            PIN: {
+                                type: ArgumentType.STRING,
+                                menu: 'pins',
+                                defaultValue: Pins.IO4
+                            },
+                            LEVEL: {
+                                type: ArgumentType.STRING,
+                                menu: 'levelDetect',
+                                defaultValue: Level.High
+                            }
+                        }
+                    },
+                    '---',
                     {
                         opcode: 'esp32SetPinMode',
                         text: formatMessage({
@@ -912,6 +941,12 @@ class OpenBlockMicroPythonEsp32Device {
                     },
                     level: {
                         acceptReporters: true,
+                        items: this.LEVEL_MENU
+                    },
+                    // Field-only variant for the event hat: hat blocks take
+                    // no reporter inputs, and the upload code generator reads
+                    // the level with getFieldValue.
+                    levelDetect: {
                         items: this.LEVEL_MENU
                     }
                 }
@@ -1387,6 +1422,45 @@ class OpenBlockMicroPythonEsp32Device {
             return this._peripheral.readDigitalPin(args.PIN);
         }
         return Promise.resolve(false);
+    }
+
+    /**
+     * Event hat: whether the pin currently reads the wanted level
+     * (realtime mode). The runtime polls edge-activated hats every frame
+     * and fires the stack on the false->true transition. The predicate
+     * answers synchronously from the last sampled level (promise-based hat
+     * predicates stall the poller), while a background read through the
+     * live channel keeps that sample fresh; the value is thus at most one
+     * poll cycle old.
+     * @param {object} args - the block's arguments.
+     * @return {boolean} - true when the pin reads the wanted level.
+     */
+    whenPinLevel (args) {
+        const samples = this._pinHatLevels;
+        if (!this._live || !this._peripheral.readDigitalPin) {
+            // Drop the samples: they describe a board we can no longer
+            // see. Keeping them would let the first poll after a
+            // reconnect answer from a pre-disconnect level and fire the
+            // hat on a level the pin does not have anymore.
+            if (samples.size) samples.clear();
+            return false;
+        }
+        const pin = args.PIN;
+        const wanted = String(args.LEVEL) === Level.Low ? Level.Low : Level.High;
+        // Bias the idle level away from the watched edge, same as the
+        // upload generator does, so an unwired pin does not float onto
+        // that edge and self-trigger. An explicit "set pin mode" block
+        // still wins: the bias only applies to a never configured pin.
+        this._peripheral.readDigitalPin(
+            pin, wanted === Level.High ? 'INPUT_PULLDOWN' : 'INPUT_PULLUP')
+            .then(value => {
+                samples.set(pin, value === true ? Level.High : Level.Low);
+            })
+            .catch(() => {
+                // A dropped live read leaves the last sample in place;
+                // the hat simply stops firing until a read lands again.
+            });
+        return samples.get(pin) === wanted;
     }
 
     /**

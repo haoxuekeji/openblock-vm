@@ -219,8 +219,8 @@ class MicroPythonMultiTransportPeripheral {
         return this._call('releaseServo', [pin], Promise.resolve());
     }
 
-    readDigitalPin (pin) {
-        return this._call('readDigitalPin', [pin], Promise.resolve(0));
+    readDigitalPin (pin, idleMode) {
+        return this._call('readDigitalPin', [pin, idleMode], Promise.resolve(0));
     }
 
     readAnalogPin (pin) {

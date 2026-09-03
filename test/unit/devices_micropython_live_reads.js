@@ -511,6 +511,33 @@ test('the pump pauses during an upload and resumes afterwards', async t => {
     t.end();
 });
 
+test('readDigitalPin applies the requested idle bias once', async t => {
+    const {peripheral, commands} = makeReadPeripheral({'p4.value()': '0'});
+
+    await peripheral.readDigitalPin('4', 'INPUT_PULLDOWN');
+    const setup = commands.find(command => command.indexOf('p4.init(') !== -1);
+    t.ok(setup, 'the pin was configured');
+    t.match(setup, 'p4.init(Pin.IN, Pin.PULL_DOWN)', 'idle level pulled away from the high edge');
+
+    // A configured pin keeps its mode: re-biasing every poll would fight
+    // an explicit pin mode block and cost a round trip per frame.
+    const afterSetup = commands.length;
+    await peripheral.readDigitalPin('4', 'INPUT_PULLUP');
+    t.notOk(commands.slice(afterSetup).some(command => command.indexOf('p4.init(') !== -1),
+        'no second init for an already configured pin');
+    t.end();
+});
+
+test('readDigitalPin defaults to a plain input', async t => {
+    const {peripheral, commands} = makeReadPeripheral({'p4.value()': '1'});
+
+    const value = await peripheral.readDigitalPin('4');
+    t.equal(value, true, 'high level read back');
+    t.match(commands.find(command => command.indexOf('p4.init(') !== -1),
+        'p4.init(Pin.IN)', 'plain reads stay unbiased');
+    t.end();
+});
+
 test('reset stops the pump and clears the hot table', async t => {
     const {peripheral, commands} = makeReadPeripheral({'adc4.read()': '7'}, {latency: 5});
 

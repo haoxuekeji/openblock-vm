@@ -196,6 +196,18 @@ const LIVE_READ_PUMP_INTERVAL = 16;
 const LIVE_READ_SEPARATOR = '\x1e';
 
 /**
+ * Pin mode vocabulary shared by the mode block and by the reads that
+ * carry an idle bias, mapped to the machine.Pin.init() arguments.
+ * @readonly
+ */
+const PIN_MODE_ARGS = {
+    INPUT: 'Pin.IN',
+    OUTPUT: 'Pin.OUT',
+    INPUT_PULLUP: 'Pin.IN, Pin.PULL_UP',
+    INPUT_PULLDOWN: 'Pin.IN, Pin.PULL_DOWN'
+};
+
+/**
  * Board-side sampling period of the live push sampler in ms. The
  * sampler is a background thread injected through the raw REPL: it
  * evaluates the hot expressions at this rate and notifies one frame per
@@ -1561,13 +1573,7 @@ class MicroPythonBlePeripheral {
      * @return {Promise} - resolved when done.
      */
     setPinMode (pin, mode) {
-        const modeArgs = {
-            INPUT: 'Pin.IN',
-            OUTPUT: 'Pin.OUT',
-            INPUT_PULLUP: 'Pin.IN, Pin.PULL_UP',
-            INPUT_PULLDOWN: 'Pin.IN, Pin.PULL_DOWN'
-        };
-        const arg = modeArgs[mode] || 'Pin.IN';
+        const arg = PIN_MODE_ARGS[mode] || PIN_MODE_ARGS.INPUT;
         return this.execLive(this._pinSetupCode(pin, arg) || `p${pin}.init(${arg})`);
     }
 
@@ -2151,12 +2157,16 @@ class MicroPythonBlePeripheral {
     /**
      * Read a digital pin (live mode).
      * @param {string} pin - the pin number.
+     * @param {string} [idleMode] - PIN_MODE_ARGS key applied when the pin
+     *   was never configured. Callers that watch for an edge pass a
+     *   pulled mode so an unwired pin does not float onto that edge.
      * @return {Promise<boolean>} - the pin level.
      */
-    async readDigitalPin (pin) {
+    async readDigitalPin (pin, idleMode = 'INPUT') {
         // Only force input mode if the pin was never configured, so reading
-        // back an output pin keeps working.
-        const setup = this._pinSetupCode(pin, this._livePins[pin] ? null : 'Pin.IN');
+        // back an output pin keeps working and an explicit pin mode wins.
+        const arg = PIN_MODE_ARGS[idleMode] || PIN_MODE_ARGS.INPUT;
+        const setup = this._pinSetupCode(pin, this._livePins[pin] ? null : arg);
         if (setup) await this.execLive(setup.trim());
         return (await this._readNumber(`p${pin}.value()`)) === 1;
     }
