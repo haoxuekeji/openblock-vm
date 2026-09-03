@@ -24,6 +24,11 @@ jobs:
 
       - run: npm ci
 
+      # Gating since the backlog was cleared: eslint over the whole repo
+      # plus format-message over every file that declares a message.
+      - name: Lint
+        run: npm run lint
+
       # Real test gate: 59 unit + 46 integration tap files, including
       # transport switching / raw REPL / terminal capture / onboard files
       # (devices_micropython_*) and legacy sb2/sb3 loading suites.

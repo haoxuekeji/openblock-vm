@@ -197,7 +197,7 @@ class CommonPeripheral{
     /**
      * List files on the board through OpenBlock Link / obmpy.
      * @param {string} directory - board directory.
-     * @return {Promise<Array>}
+     * @return {Promise<Array>} - one entry per name in that directory.
      */
     listBoardFiles (directory = '.') {
         if (!this.isConnected()) {
@@ -209,7 +209,7 @@ class CommonPeripheral{
     /**
      * Read a board file through OpenBlock Link / obmpy.
      * @param {string} filePath - board path.
-     * @return {Promise<object>}
+     * @return {Promise<object>} - the file entry with its base64 content.
      */
     readBoardFile (filePath) {
         if (!this.isConnected()) {
@@ -221,7 +221,7 @@ class CommonPeripheral{
     /**
      * Remove a board file through OpenBlock Link / obmpy.
      * @param {string} filePath - board path.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is gone.
      */
     removeBoardFile (filePath) {
         if (!this.isConnected()) {
@@ -234,7 +234,7 @@ class CommonPeripheral{
      * Write a board file through OpenBlock Link / obmpy.
      * @param {string} filePath - board path.
      * @param {string} contentBase64 - file content.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is written.
      */
     writeBoardFile (filePath, contentBase64) {
         if (!this.isConnected()) {

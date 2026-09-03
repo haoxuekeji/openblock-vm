@@ -197,7 +197,7 @@ class Serialport extends JSONRPC {
      * List files on a MicroPython board via OpenBlock Link.
      * @param {string} directory - board directory.
      * @param {object} config - device uploader config.
-     * @return {Promise<Array>}
+     * @return {Promise<Array>} - one entry per name in that directory.
      */
     listBoardFiles (directory, config) {
         return this.sendRemoteRequest('listBoardFiles', {directory, config});
@@ -207,7 +207,7 @@ class Serialport extends JSONRPC {
      * Read a MicroPython board file via OpenBlock Link.
      * @param {string} path - board path.
      * @param {object} config - device uploader config.
-     * @return {Promise<object>}
+     * @return {Promise<object>} - the file entry with its base64 content.
      */
     readBoardFile (path, config) {
         return this.sendRemoteRequest('readBoardFile', {path, config});
@@ -217,7 +217,7 @@ class Serialport extends JSONRPC {
      * Remove a MicroPython board file via OpenBlock Link.
      * @param {string} path - board path.
      * @param {object} config - device uploader config.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is gone.
      */
     removeBoardFile (path, config) {
         return this.sendRemoteRequest('removeBoardFile', {path, config});
@@ -228,7 +228,7 @@ class Serialport extends JSONRPC {
      * @param {string} path - board path.
      * @param {string} contentBase64 - file content.
      * @param {object} config - device uploader config.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is written.
      */
     writeBoardFile (path, contentBase64, config) {
         return this.sendRemoteRequest('writeBoardFile', {path, contentBase64, config});

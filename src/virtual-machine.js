@@ -415,7 +415,7 @@ class VirtualMachine extends EventEmitter {
      * List files on the connected MicroPython board.
      * @param {string} extensionId - device id.
      * @param {string} directory - board directory.
-     * @return {Promise<Array>}
+     * @return {Promise<Array>} - one entry per name in that directory.
      */
     listBoardFiles (extensionId, directory) {
         return this.runtime.listBoardFiles(extensionId, directory);
@@ -425,7 +425,7 @@ class VirtualMachine extends EventEmitter {
      * Read a file from the connected MicroPython board.
      * @param {string} extensionId - device id.
      * @param {string} filePath - board path.
-     * @return {Promise<object>}
+     * @return {Promise<object>} - the file entry with its base64 content.
      */
     readBoardFile (extensionId, filePath) {
         return this.runtime.readBoardFile(extensionId, filePath);
@@ -435,7 +435,7 @@ class VirtualMachine extends EventEmitter {
      * Remove a file from the connected MicroPython board.
      * @param {string} extensionId - device id.
      * @param {string} filePath - board path.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is gone.
      */
     removeBoardFile (extensionId, filePath) {
         return this.runtime.removeBoardFile(extensionId, filePath);
@@ -446,7 +446,7 @@ class VirtualMachine extends EventEmitter {
      * @param {string} extensionId - device id.
      * @param {string} filePath - board path.
      * @param {string} contentBase64 - file content.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is written.
      */
     writeBoardFile (extensionId, filePath, contentBase64) {
         return this.runtime.writeBoardFile(extensionId, filePath, contentBase64);

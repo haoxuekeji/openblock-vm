@@ -495,10 +495,9 @@ class MicroPythonBlePeripheral {
          * frame grace (a frame may have been sampled before the write
          * executed and must not survive it); carry holds a partial
          * frame split across notification packets.
-         * @type {boolean} / @type {boolean} / @type {boolean} /
-         * @type {Array.<string>} / @type {number} / @type {number} /
-         * @type {number} / @type {boolean} / @type {number} /
-         * @type {number} / @type {string}
+         * Field types in declaration order: boolean, boolean, boolean,
+         * Array.<string>, number, number, number, boolean, number,
+         * number, string.
          */
         this._livePushEnabled = true;
         this._livePushActive = false;
@@ -521,7 +520,7 @@ class MicroPythonBlePeripheral {
          * whether a watchdog-triggered recovery is still pending in the
          * live queue. Sampling/stall thresholds live on the instance so
          * tests can shrink them.
-         * @type {?object} / @type {?number} / @type {boolean}
+         * Field types in declaration order: ?object, ?number, boolean.
          */
         this._liveWatchdogTimer = null;
         this._liveStalledSince = null;
@@ -533,7 +532,7 @@ class MicroPythonBlePeripheral {
          * Live-channel availability reporting: when the last
          * PERIPHERAL_LIVE_UNAVAILABLE was emitted (throttle) and whether
          * one is outstanding (an AVAILABLE event is owed on recovery).
-         * @type {number} / @type {boolean}
+         * Field types in declaration order: number, boolean.
          */
         this._lastLiveUnavailableEmit = 0;
         this._liveUnavailableAnnounced = false;
@@ -542,7 +541,7 @@ class MicroPythonBlePeripheral {
          * Read requests collected for the next batched flush, in arrival
          * order: {expression, resolvers} entries (identical expressions
          * within one window share an entry), plus the flush timer.
-         * @type {Array.<object>} / @type {?object}
+         * Field types in declaration order: Array.<object>, ?object.
          */
         this._pendingLiveReads = [];
         this._liveReadFlushTimer = null;
@@ -551,7 +550,7 @@ class MicroPythonBlePeripheral {
          * Console bytes collected for the next aggregated
          * PERIPHERAL_RECIVE_DATA emission, their total size and the
          * pending flush timer.
-         * @type {Array.<Buffer>} / @type {number} / @type {?object}
+         * Field types in declaration order: Array.<Buffer>, number, ?object.
          */
         this._receiveChunks = [];
         this._receiveChunkBytes = 0;
@@ -2224,7 +2223,7 @@ class MicroPythonBlePeripheral {
      * @return {Promise} - resolved when done.
      */
     async setBleDeviceName (name) {
-        let clean = String(name === null || name === undefined ? '' : name).trim();
+        let clean = String(name === null || typeof name === 'undefined' ? '' : name).trim();
         if (!clean) return;
         // Trim to the 26 byte budget without splitting a utf-8 code point.
         while (clean.length > 0 && Buffer.byteLength(clean, 'utf8') > 26) {
@@ -2570,7 +2569,8 @@ class MicroPythonBlePeripheral {
      * @private
      */
     _pyQuote (filePath) {
-        return `'${String(filePath).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+        return `'${String(filePath).replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")}'`;
     }
 
     /**
@@ -2615,7 +2615,8 @@ class MicroPythonBlePeripheral {
     /**
      * List files on the MicroPython board filesystem.
      * @param {string} directory - board directory (default '.').
-     * @return {Promise<Array.<{name:string, path:string, isDir:boolean, size:number}>>}
+     * @return {Promise<Array.<{name:string, path:string, isDir:boolean, size:number}>>} -
+     *   one entry per name in that directory.
      */
     async listBoardFiles (directory = '.') {
         const dir = this._sanitizeBoardPath(directory || '.');
@@ -2643,7 +2644,8 @@ class MicroPythonBlePeripheral {
     /**
      * Read a file from the board as base64.
      * @param {string} filePath - board file path.
-     * @return {Promise<{name:string, path:string, size:number, contentBase64:string}>}
+     * @return {Promise<{name:string, path:string, size:number, contentBase64:string}>} -
+     *   the file with its base64 content.
      */
     async readBoardFile (filePath) {
         const path = this._sanitizeBoardPath(filePath);
@@ -2660,7 +2662,10 @@ class MicroPythonBlePeripheral {
             ' _data=_f.read()\n' +
             "print(str(_st[6])+'\\t'+ubinascii.b2a_base64(_data).decode().strip())\n";
         const output = await this._runBoardFsCommand(command, 60000);
-        const line = String(output || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+        const line = String(output || '').trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .pop() || '';
         const tab = line.indexOf('\t');
         if (tab === -1) {
             throw new Error('Unexpected board file response');
@@ -2674,7 +2679,7 @@ class MicroPythonBlePeripheral {
     /**
      * Delete a file (or empty directory) on the board.
      * @param {string} filePath - board path.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is gone.
      */
     async removeBoardFile (filePath) {
         const path = this._sanitizeBoardPath(filePath);
@@ -2696,7 +2701,7 @@ class MicroPythonBlePeripheral {
      * Write a file to the board from base64 content.
      * @param {string} filePath - board path.
      * @param {string} contentBase64 - file bytes as base64.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is written.
      */
     async writeBoardFile (filePath, contentBase64) {
         const path = this._sanitizeBoardPath(filePath);
@@ -2735,27 +2740,29 @@ class MicroPythonBlePeripheral {
      * Parse `listBoardFiles` stdout into structured entries.
      * @param {string} output - raw REPL stdout.
      * @param {string} directory - listed directory.
-     * @return {Array.<{name:string, path:string, isDir:boolean, size:number}>}
+     * @return {Array.<{name:string, path:string, isDir:boolean, size:number}>} -
+     *   one entry per parsed line.
      */
     static parseBoardLsOutput (output, directory = '.') {
         const dir = directory && directory !== '.' ? String(directory).replace(/\/$/, '') : '';
         const entries = [];
-        String(output || '').split(/\r?\n/).forEach(line => {
-            const trimmed = line.trim();
-            if (!trimmed) return;
-            const parts = trimmed.split('\t');
-            if (parts.length < 2) return;
-            const kind = parts[0];
-            const name = parts[1];
-            const size = Number(parts[2] || 0);
-            if ((kind !== 'F' && kind !== 'D') || !name) return;
-            entries.push({
-                name,
-                path: dir ? `${dir}/${name}` : name,
-                isDir: kind === 'D',
-                size: Number.isFinite(size) ? size : 0
+        String(output || '').split(/\r?\n/)
+            .forEach(line => {
+                const trimmed = line.trim();
+                if (!trimmed) return;
+                const parts = trimmed.split('\t');
+                if (parts.length < 2) return;
+                const kind = parts[0];
+                const name = parts[1];
+                const size = Number(parts[2] || 0);
+                if ((kind !== 'F' && kind !== 'D') || !name) return;
+                entries.push({
+                    name,
+                    path: dir ? `${dir}/${name}` : name,
+                    isDir: kind === 'D',
+                    size: Number.isFinite(size) ? size : 0
+                });
             });
-        });
         entries.sort((a, b) => {
             if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
             return a.name.localeCompare(b.name);

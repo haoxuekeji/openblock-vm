@@ -2072,7 +2072,7 @@ class Runtime extends EventEmitter {
      * List files on the connected MicroPython board.
      * @param {string} deviceId - the id of the device.
      * @param {string} directory - board directory.
-     * @return {Promise<Array>}
+     * @return {Promise<Array>} - one entry per name in that directory.
      */
     listBoardFiles (deviceId, directory) {
         deviceId = this.analysisRealDeviceId(deviceId);
@@ -2087,7 +2087,7 @@ class Runtime extends EventEmitter {
      * Read a file from the connected MicroPython board.
      * @param {string} deviceId - the id of the device.
      * @param {string} filePath - board path.
-     * @return {Promise<object>}
+     * @return {Promise<object>} - the file entry with its base64 content.
      */
     readBoardFile (deviceId, filePath) {
         deviceId = this.analysisRealDeviceId(deviceId);
@@ -2102,7 +2102,7 @@ class Runtime extends EventEmitter {
      * Remove a file from the connected MicroPython board.
      * @param {string} deviceId - the id of the device.
      * @param {string} filePath - board path.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is gone.
      */
     removeBoardFile (deviceId, filePath) {
         deviceId = this.analysisRealDeviceId(deviceId);
@@ -2118,7 +2118,7 @@ class Runtime extends EventEmitter {
      * @param {string} deviceId - the id of the device.
      * @param {string} filePath - board path.
      * @param {string} contentBase64 - file content.
-     * @return {Promise<boolean>}
+     * @return {Promise<boolean>} - true once the file is written.
      */
     writeBoardFile (deviceId, filePath, contentBase64) {
         deviceId = this.analysisRealDeviceId(deviceId);

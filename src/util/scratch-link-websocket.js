@@ -25,7 +25,7 @@ class ScratchLinkWebSocket {
     open () {
         switch (this._type) {
         case 'BLE':
-            //this._ws = new WebSocket('ws://127.0.0.1:20111/openblock/ble');
+            // this._ws = new WebSocket('ws://127.0.0.1:20111/openblock/ble');
             this._ws = new WebSocket('ws://127.0.0.1:20111/scratch/ble');
             break;
         case 'BT':
