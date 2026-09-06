@@ -14,6 +14,9 @@ const WEB_BLE_SILENT_NOTIFICATION_SETUP_TIMEOUT = 8000;
 // Windows (no resolve, no reject, no gattserverdisconnected). Bound every
 // write so the callers' await chains always terminate.
 const WEB_BLE_GATT_WRITE_TIMEOUT = 10000;
+// Rejection message of a GATT read/write that reaches the front of the
+// operation queue after the link went away (or was replaced meanwhile).
+const WEB_BLE_NOT_CONNECTED = 'Bluetooth device is not connected';
 
 /**
  * localStorage key prefix remembering the last connected Web Bluetooth
@@ -555,6 +558,27 @@ class WebBLE {
         this._silentConnect = false;
         this._connectAttempt = 0;
 
+        /**
+         * FIFO of GATT reads/writes. The browser (and the ATT protocol
+         * under it) allow one outstanding request per link: Chrome
+         * rejects a read/write that overlaps another operation on the
+         * same characteristic with NetworkError "GATT operation already
+         * in progress" without touching the connection. Extensions fire
+         * such bursts routinely (WeDo 2.0 stop button: stop tone + every
+         * motor off in one tick), so serialize them here the way Scratch
+         * Link does server-side instead of failing the second one.
+         * @type {Promise}
+         */
+        this._gattQueue = Promise.resolve();
+
+        /**
+         * Characteristics that already have a value-changed listener in
+         * the current connection (cache key -> true), so re-subscribing
+         * does not stack duplicate listeners. Reset with the caches.
+         * @type {object}
+         */
+        this._notifying = {};
+
         // Timeouts are injectable for unit tests only.
         this._notificationSetupTimeout =
             options.notificationSetupTimeout || WEB_BLE_NOTIFICATION_SETUP_TIMEOUT;
@@ -713,9 +737,7 @@ class WebBLE {
         this._connectAttempt += 1;
         const connectAttempt = this._connectAttempt;
         this._silentConnect = silent;
-        this._server = null;
-        this._services = {};
-        this._characteristics = {};
+        this._resetGattState();
 
         let timeoutId = null;
         const connectPromise = this._device.gatt.connect()
@@ -812,9 +834,7 @@ class WebBLE {
                 if (this._device && this._device.gatt.connected) {
                     this._device.gatt.disconnect();
                 }
-                this._server = null;
-                this._services = {};
-                this._characteristics = {};
+                this._resetGattState();
                 if (!suppressError) {
                     this._handleRequestError(e);
                     return false;
@@ -845,9 +865,7 @@ class WebBLE {
         if (this._discoverTimeoutID) {
             window.clearTimeout(this._discoverTimeoutID);
         }
-        this._server = null;
-        this._services = {};
-        this._characteristics = {};
+        this._resetGattState();
         if (!silent) {
             this._runtime.emit(this._runtime.constructor.PERIPHERAL_DISCONNECTED);
         }
@@ -855,6 +873,22 @@ class WebBLE {
 
     isConnected () {
         return this._connected;
+    }
+
+    /**
+     * Forget everything tied to one GATT connection: the server and the
+     * service/characteristic handle caches (a reboot invalidates them),
+     * the notification bookkeeping, and the operation queue (operations
+     * still waiting in it belong to the old link and fail fast when they
+     * come up; a new connection must not wait behind them).
+     * @private
+     */
+    _resetGattState () {
+        this._server = null;
+        this._services = {};
+        this._characteristics = {};
+        this._notifying = {};
+        this._gattQueue = Promise.resolve();
     }
 
     _getCharacteristic (serviceId, characteristicId) {
@@ -882,17 +916,115 @@ class WebBLE {
             });
     }
 
+    /**
+     * Attach the value-changed listener of a characteristic once per
+     * connection. Extensions re-subscribe freely (WeDo 2.0 does so every
+     * time a sensor is plugged in); stacking one listener per call made
+     * every notification reach the extension several times over.
+     * @param {BluetoothRemoteGATTCharacteristic} characteristic - the characteristic.
+     * @param {string} cacheKey - its service/characteristic cache key.
+     * @private
+     */
+    _listenForValueChanges (characteristic, cacheKey) {
+        if (this._notifying[cacheKey]) return;
+        this._notifying[cacheKey] = true;
+        characteristic.addEventListener('characteristicvaluechanged', event => {
+            if (this._characteristicDidChangeCallback) {
+                this._characteristicDidChangeCallback(
+                    WebBLE._dataViewToBase64(event.target.value)
+                );
+            }
+        });
+    }
+
+    /**
+     * Run a GATT read/write once every earlier one has settled. Failed
+     * operations do not hold up the ones behind them, and an operation
+     * that reaches the front after the link was torn down (or replaced)
+     * fails fast instead of touching a stale server handle.
+     * @param {Function} operation - starts the operation, returns its promise.
+     * @return {Promise} - settles with the operation's outcome.
+     * @private
+     */
+    _enqueueGattOperation (operation) {
+        const attempt = this._connectAttempt;
+        const run = () => {
+            if (!this._connected || !this._server || attempt !== this._connectAttempt) {
+                return Promise.reject(new Error(WEB_BLE_NOT_CONNECTED));
+            }
+            return operation();
+        };
+        const result = this._gattQueue.then(run, run);
+        this._gattQueue = result.then(() => null, () => null);
+        return result;
+    }
+
+    /**
+     * Bound a GATT operation promise. Seen live on Windows: after a
+     * flapping reconnect the write promise on the dead link never settles
+     * and no disconnect event ever fires, parking the awaiting upload flow
+     * forever (stuck at "Entering raw REPL..."). A timeout is treated like
+     * a dropped connection by _handleGattOperationError.
+     * @param {Promise} promise - the browser's operation promise.
+     * @param {string} timeoutMessage - rejection message on timeout.
+     * @return {Promise} - the bounded promise.
+     * @private
+     */
+    _boundGattOperation (promise, timeoutMessage) {
+        return new Promise((resolve, reject) => {
+            const timer = window.setTimeout(() => {
+                reject(new Error(timeoutMessage));
+            }, this._gattWriteTimeout);
+            promise.then(value => {
+                window.clearTimeout(timer);
+                resolve(value);
+            }, error => {
+                window.clearTimeout(timer);
+                reject(error);
+            });
+        });
+    }
+
+    /**
+     * Whether a failed GATT operation means the link itself is gone.
+     * Chrome rejects plenty of operations on a perfectly healthy link
+     * ("GATT operation already in progress", "not permitted", "not
+     * supported", a missing optional characteristic); tearing the
+     * connection down for those turned e.g. the WeDo 2.0 stop button into
+     * a disconnect. The device handle knows whether the link is up, and a
+     * real loss also fires gattserverdisconnected on its own.
+     * @param {Error} e - the rejection.
+     * @return {boolean} - true when the link should be considered lost.
+     * @private
+     */
+    _isLinkLossError (e) {
+        if (!this._device || !this._device.gatt || !this._device.gatt.connected) return true;
+        const message = `${(e && e.message) || ''}`;
+        // Our own bound: a zombie link whose operations never settle.
+        if (/timed out/i.test(message)) return true;
+        // Chrome: "GATT Server is disconnected. Cannot perform GATT operations."
+        return /disconnected/i.test(message);
+    }
+
+    /**
+     * Route a failed GATT read/write: a lost link goes through the
+     * disconnect handling, anything else is logged and left to the caller.
+     * @param {Error} e - the rejection.
+     * @private
+     */
+    _handleGattOperationError (e) {
+        if (this._isLinkLossError(e)) {
+            this.handleDisconnectError(e);
+            return;
+        }
+        log.warn('[WebBLE] GATT operation failed on a live link:', e);
+    }
+
     startNotifications (serviceId, characteristicId, onCharacteristicChanged = null) {
         this._characteristicDidChangeCallback = onCharacteristicChanged;
         return this._getCharacteristic(serviceId, characteristicId)
             .then(characteristic => {
-                characteristic.addEventListener('characteristicvaluechanged', event => {
-                    if (this._characteristicDidChangeCallback) {
-                        this._characteristicDidChangeCallback(
-                            WebBLE._dataViewToBase64(event.target.value)
-                        );
-                    }
-                });
+                this._listenForValueChanges(characteristic, `${serviceId}__${characteristicId}`);
                 return characteristic.startNotifications();
             });
     }
@@ -901,32 +1033,31 @@ class WebBLE {
         if (onCharacteristicChanged) {
             this._characteristicDidChangeCallback = onCharacteristicChanged;
         }
-        return this._getCharacteristic(serviceId, characteristicId)
-            .then(characteristic => {
-                if (optStartNotifications) {
-                    characteristic.addEventListener('characteristicvaluechanged', event => {
-                        if (this._characteristicDidChangeCallback) {
-                            this._characteristicDidChangeCallback(
-                                WebBLE._dataViewToBase64(event.target.value)
-                            );
-                        }
-                    });
-                    return characteristic.startNotifications()
-                        .then(() => characteristic.readValue());
-                }
-                return characteristic.readValue();
-            })
+        // The subscription stays outside the operation queue: a CCCD write
+        // can stay pending for a long time on some stacks (see
+        // connectPeripheral) and must not block every queued read/write.
+        const subscribed = optStartNotifications ?
+            this._getCharacteristic(serviceId, characteristicId)
+                .then(characteristic => {
+                    this._listenForValueChanges(characteristic, `${serviceId}__${characteristicId}`);
+                    return characteristic.startNotifications();
+                }) :
+            Promise.resolve();
+        return subscribed
+            .then(() => this._enqueueGattOperation(() => this._getCharacteristic(serviceId, characteristicId)
+                .then(characteristic => this._boundGattOperation(
+                    characteristic.readValue(), 'GATT read timed out'))))
             .then(dataView => ({
                 message: WebBLE._dataViewToBase64(dataView),
                 encoding: 'base64'
             }))
             .catch(e => {
-                this.handleDisconnectError(e);
+                this._handleGattOperationError(e);
             });
     }
 
     write (serviceId, characteristicId, message, encoding = null, withResponse = null) {
-        return this._getCharacteristic(serviceId, characteristicId)
+        return this._enqueueGattOperation(() => this._getCharacteristic(serviceId, characteristicId)
             .then(characteristic => {
                 let data;
                 if (encoding === 'base64') {
@@ -937,26 +1068,10 @@ class WebBLE {
                 const writePromise = withResponse ?
                     characteristic.writeValueWithResponse(data) :
                     characteristic.writeValueWithoutResponse(data);
-                // Seen live on Windows: after a flapping reconnect the
-                // write promise on the dead link never settles and no
-                // disconnect event ever fires, parking the awaiting upload
-                // flow forever (stuck at "Entering raw REPL..."). Bound the
-                // write and treat a timeout like a dropped connection.
-                return new Promise((resolve, reject) => {
-                    const timer = window.setTimeout(() => {
-                        reject(new Error('GATT write timed out'));
-                    }, this._gattWriteTimeout);
-                    writePromise.then(value => {
-                        window.clearTimeout(timer);
-                        resolve(value);
-                    }, error => {
-                        window.clearTimeout(timer);
-                        reject(error);
-                    });
-                });
-            })
+                return this._boundGattOperation(writePromise, 'GATT write timed out');
+            }))
             .catch(e => {
-                this.handleDisconnectError(e);
+                this._handleGattOperationError(e);
                 // Callers await their writes: propagate the failure so
                 // REPL flows fail fast instead of waiting for an answer
                 // to bytes that never left the browser.

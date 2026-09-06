@@ -932,7 +932,13 @@ class Boost {
             uuid,
             Base64Util.uint8ArrayToBase64(message),
             'base64'
-        );
+        ).catch(e => {
+            // Commands are fire-and-forget: a rejected write on a live link
+            // is not a connection loss (the transport reports a lost link
+            // itself), so swallow it here rather than leaving the bursts
+            // sent by the stop button as unhandled rejections.
+            log.warn(`Boost write failed: ${(e && e.message) || e}`);
+        });
     }
 
     /**
