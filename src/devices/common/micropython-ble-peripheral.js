@@ -1743,6 +1743,38 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Release the driver objects (pwm/servo/dac/adc/touch) that currently
+     * own a pin, so the pin can be handed back to plain GPIO.
+     *
+     * On the ESP32 a `Pin.init(mode)` re-routes the pad in the GPIO matrix
+     * to the GPIO register output, silently detaching it from e.g. the
+     * LEDC channel behind a live PWM object. The object survives, `duty()`
+     * keeps "working", and the pin stays dead until the board reboots.
+     * Seen live: "set pin mode OUT" + "PWM" runs fine on the first green
+     * flag, the second one gives no output. Forgetting the object here
+     * makes the next PWM/servo/DAC/ADC/touch block recreate it, which
+     * re-attaches the pad. PWM objects are deinit()ed so their LEDC channel
+     * is freed; the others have no deinit worth calling and are simply
+     * recreated on next use.
+     * @param {string} pin - the pin number.
+     * @return {string} - the python statements needed, may be empty.
+     * @private
+     */
+    _releasePinObjects (pin) {
+        let code = '';
+        for (const kind of ['pwm', 'servo']) {
+            const key = `${kind}${pin}`;
+            if (this._liveObjects.delete(key)) {
+                code += `${key}.deinit()\n`;
+            }
+        }
+        for (const kind of ['dac', 'adc', 'tp']) {
+            this._liveObjects.delete(`${kind}${pin}`);
+        }
+        return code;
+    }
+
+    /**
      * Make sure a Pin object exists on the board with the wanted mode.
      * @param {string} pin - the pin number.
      * @param {string} mode - 'in', 'out' or null to keep the current mode.
@@ -1756,7 +1788,9 @@ class MicroPythonBlePeripheral {
             this._livePins[pin] = null;
         }
         if (mode && this._livePins[pin] !== mode) {
-            code += `p${pin}.init(${mode})\n`;
+            // Handing the pin to plain GPIO: whatever driver object owned it
+            // must let go first, or it keeps driving a detached pad.
+            code = `${this._releasePinObjects(pin)}${code}p${pin}.init(${mode})\n`;
             this._livePins[pin] = mode;
         }
         return code;
