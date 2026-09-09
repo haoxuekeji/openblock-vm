@@ -34,6 +34,9 @@ const makeLivePeripheral = onWrite => {
     );
     peripheral.isConnected = () => true;
     peripheral._liveReady = true;
+    // Keep the resync path quick, the timing of the interrupt burst is
+    // covered by devices_micropython_interrupt.js.
+    peripheral._interruptGapsMs = [5, 5, 5];
     const writes = [];
     peripheral._writeRaw = buffer => {
         const text = buffer.toString('latin1');
@@ -43,6 +46,8 @@ const makeLivePeripheral = onWrite => {
     };
     return {peripheral, writes};
 };
+
+const isInterrupt = text => text.includes('\x03') || text === MicroPythonBlePeripheral.STOP_TOKEN;
 
 test('short live commands take the plain raw REPL', async t => {
     const {peripheral, writes} = makeLivePeripheral((text, reply) => {
@@ -88,14 +93,14 @@ test('python-level board errors do not tear down the live session', async t => {
     const output = await peripheral.execLive('p9.value(1)');
     t.equal(output, null, 'failed command reports null');
     t.ok(peripheral._liveReady, 'live session kept');
-    t.notOk(writes.includes('\r\x03\x03'), 'no interrupt/resync sent');
+    t.notOk(writes.some(isInterrupt), 'no interrupt/resync sent');
     t.end();
 });
 
 test('a protocol timeout resyncs the raw REPL and retries the command once', async t => {
     let dropReplies = 1;
     const {peripheral, writes} = makeLivePeripheral((text, reply) => {
-        if (text === '\r\x03\x03') return;
+        if (isInterrupt(text)) return;
         if (text === '\r\x01') {
             reply('raw REPL; CTRL-B to exit\r\n>');
             return;
@@ -113,7 +118,7 @@ test('a protocol timeout resyncs the raw REPL and retries the command once', asy
 
     const output = await peripheral.execLive('p4.value(1)', 50);
     t.equal(output, '', 'command answered by the post-resync retry');
-    t.ok(writes.includes('\r\x03\x03'), 'board interrupted for resync');
+    t.ok(writes.some(text => text === '\x03'), 'board interrupted for resync');
     t.ok(writes.includes('\r\x01'), 'raw REPL re-entered');
     t.ok(peripheral._liveReady, 'live session usable again');
     t.equal(writes.filter(text => text === 'p4.value(1)\x04').length, 2,
@@ -127,7 +132,7 @@ test('a protocol timeout resyncs the raw REPL and retries the command once', asy
 test('a desynced first command heals well below the execution timeout', async t => {
     let dropReplies = 1;
     const {peripheral} = makeLivePeripheral((text, reply) => {
-        if (text === '\r\x03\x03') return;
+        if (isInterrupt(text)) return;
         if (text === '\r\x01') {
             reply('raw REPL; CTRL-B to exit\r\n>');
             return;

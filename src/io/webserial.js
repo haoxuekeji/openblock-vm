@@ -265,6 +265,19 @@ class WebSerial {
     }
 
     /**
+     * USB identity of the picked port, when the browser exposes it.
+     * @return {{usbVendorId: ?number, usbProductId: ?number}} - the ids,
+     *   undefined fields for non-USB ports.
+     */
+    getPortInfo () {
+        try {
+            return (this._port && this._port.getInfo()) || {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    /**
      * Handle the browser-level unplug event for our port.
      * @param {Event} event - the navigator.serial disconnect event.
      * @private

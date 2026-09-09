@@ -369,7 +369,9 @@ test('the live prologue kills leftover samplers of a previous session', t => {
     // next handshake without costing a round trip.
     const source = fs.readFileSync(
         require.resolve('../../src/devices/common/micropython-ble-peripheral'), 'utf8');
-    t.ok(/LIVE_PROLOGUE = '[^']*_ob_push_g=-1'/.test(source),
+    // The literal is concatenated over several lines; the generation
+    // reset must be its final statement.
+    t.ok(/LIVE_PROLOGUE = '[^;]*?'_ob_push_g=-1';/.test(source),
         'prologue resets the sampler generation');
     t.end();
 });

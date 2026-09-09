@@ -66,6 +66,69 @@ const REPL_RESPONSE_TIMEOUT = 5000;
 const LIVE_ACK_TIMEOUT = 1000;
 
 /**
+ * Pauses after each Ctrl-C of one interrupt burst. Every Ctrl-C is its
+ * own write: the firmware's dupterm path (obble over BLE) turns only the
+ * first interrupt byte of a notification into a KeyboardInterrupt and
+ * leaves the rest of that packet unread until the next write arrives,
+ * so "\x03\x03" in one packet is a single interrupt. Two writes landing
+ * in the same connection event are coalesced by the board into one read
+ * again, so each pause must exceed a connection interval (15-60ms) plus
+ * the IRQ to notify latency. The pauses grow and are not periodic so
+ * that successive interrupts sample different phases of the running
+ * loop: an interrupt inside a bare `except:` body is swallowed by the
+ * generated sensor helpers, one landing outside of it stops the program.
+ * @readonly
+ */
+const INTERRUPT_BURST_GAPS_MS = [60, 120, 240];
+
+/**
+ * Upper bound of one quiet-line wait after an interrupt burst (a tight
+ * print loop keeps streaming its backlog for a while after it stopped).
+ * @readonly
+ */
+const INTERRUPT_DRAIN_MAX_MS = 4000;
+
+/**
+ * Spacing of the extra single Ctrl-C resent while the line is still
+ * streaming during the drain: the earlier ones may have drowned in the
+ * flood, and a Ctrl-C at an idle REPL is harmless.
+ * @readonly
+ */
+const INTERRUPT_RESEND_INTERVAL = 1000;
+
+/**
+ * How long a raw REPL entry probe (Ctrl-A) waits for the banner before
+ * the program is considered still running and another interrupt burst
+ * is sent. One BLE round trip plus the firmware's output aggregation
+ * window; the Web Serial subclass shortens it.
+ * @readonly
+ */
+const RAW_REPL_PROBE_TIMEOUT = 1500;
+
+/**
+ * Interrupt burst + banner probe rounds before the program is declared
+ * not interruptible, and the hard time budget across all rounds.
+ * @readonly
+ */
+const RAW_REPL_ENTRY_ROUNDS = 4;
+const RAW_REPL_ENTRY_BUDGET_MS = 12000;
+
+/**
+ * Out-of-band force-stop request understood by the OpenBlock BLE
+ * firmware (obble strips it from the incoming stream and aborts the
+ * running program at VM level, past every Python try/except). Firmware
+ * without that support just receives twelve harmless bytes: while a
+ * program runs they queue on stdin (only input() would ever consume
+ * them), at a friendly prompt they are echoed into the line buffer and
+ * cleared by the Ctrl-C that always follows, at a raw prompt the probe's
+ * Ctrl-A resets the line. The group separator never occurs in raw REPL
+ * control traffic (\x01-\x05), Python source, base64 or console text,
+ * and the bracketed word keeps a stray lone separator from matching.
+ * @readonly
+ */
+const STOP_TOKEN = '\x1d<ob:stop>\x1d';
+
+/**
  * Max GATT connection attempts of one automatic reconnect run.
  * @readonly
  */
@@ -126,12 +189,19 @@ const RAW_REPL_MAX_COMMAND = 256;
 
 /**
  * Python statements executed once when entering realtime (live) mode.
- * The generation reset kills a push sampler thread left over from a
- * previous live session (its loop exits once the generation no longer
- * matches), at zero extra round trips.
+ * DAC and TouchPad are imported separately and optionally: the esp32
+ * port only registers machine.TouchPad on ESP32/S2/S3 and machine.DAC
+ * on chips with a DAC (not C3/S3), and an unconditional import would
+ * fail the whole handshake on those boards. The generation reset kills
+ * a push sampler thread left over from a previous live session (its
+ * loop exits once the generation no longer matches), at zero extra
+ * round trips.
  * @readonly
  */
-const LIVE_PROLOGUE = 'from machine import Pin, PWM, DAC, ADC, TouchPad\nimport time\n_ob_push_g=-1';
+const LIVE_PROLOGUE = 'from machine import Pin, PWM, ADC\nimport time\n' +
+    'try:\n from machine import DAC\nexcept ImportError: pass\n' +
+    'try:\n from machine import TouchPad\nexcept ImportError: pass\n' +
+    '_ob_push_g=-1';
 
 /**
  * How long one live sensor reading stays valid. Blocks polling the same
@@ -306,6 +376,15 @@ const pyStr = text => `'${String(text)
  * protocol. No OpenBlock Link service is required.
  */
 class MicroPythonBlePeripheral {
+    /**
+     * The out-of-band force-stop request sent ahead of every interrupt
+     * burst on the BLE transport, see STOP_TOKEN.
+     * @return {string} - the token bytes as a latin1 string.
+     */
+    static get STOP_TOKEN () {
+        return STOP_TOKEN;
+    }
+
     /**
      * Convert an extension library URL into a safe file name for the board.
      * Cache-busting query strings and URL fragments must not become part of
@@ -529,13 +608,25 @@ class MicroPythonBlePeripheral {
         this._liveWatchdogStallMs = LIVE_WATCHDOG_STALL_TIME;
 
         /**
+         * Program interrupt timing: pauses between the single Ctrl-C
+         * writes of one burst and how long a raw REPL entry probe waits
+         * for the banner. Instance copies so the Web Serial subclass
+         * (near-zero RTT) and tests can shrink them.
+         * Field types in declaration order: Array.<number>, number.
+         */
+        this._interruptGapsMs = INTERRUPT_BURST_GAPS_MS;
+        this._rawReplProbeTimeoutMs = RAW_REPL_PROBE_TIMEOUT;
+
+        /**
          * Live-channel availability reporting: when the last
-         * PERIPHERAL_LIVE_UNAVAILABLE was emitted (throttle) and whether
-         * one is outstanding (an AVAILABLE event is owed on recovery).
-         * Field types in declaration order: number, boolean.
+         * PERIPHERAL_LIVE_UNAVAILABLE was emitted (throttle), whether
+         * one is outstanding (an AVAILABLE event is owed on recovery)
+         * and the reason it carried (a new reason bypasses the throttle).
+         * Field types in declaration order: number, boolean, ?string.
          */
         this._lastLiveUnavailableEmit = 0;
         this._liveUnavailableAnnounced = false;
+        this._lastLiveUnavailableReason = null;
 
         /**
          * Read requests collected for the next batched flush, in arrival
@@ -1211,26 +1302,68 @@ class MicroPythonBlePeripheral {
     }
 
     /**
+     * Fail fast when the current exchange can not complete anymore: the
+     * user aborted the upload, or the link dropped (the awaited bytes
+     * can never arrive and the automatic reconnect owns the channel).
+     * _waitForBuffer performs the same checks for its waits; this covers
+     * the plain pauses between writes.
+     * @private
+     */
+    _throwIfAbortedOrDropped () {
+        if (this._uploading && this._abort) {
+            throw new Error('Aborted');
+        }
+        if (this._connectionDropped) {
+            throw new Error('Connection lost');
+        }
+    }
+
+    /**
+     * Whether the out-of-band STOP_TOKEN is worth sending on this
+     * transport: only the BLE firmware (obble) intercepts it, a UART
+     * REPL would just echo it.
+     * @return {boolean} - true on the BLE transport.
+     * @private
+     */
+    _sendsStopToken () {
+        return !!this._ble;
+    }
+
+    /**
      * Interrupt a running program and wait until the line goes quiet.
-     * A tight print loop saturates the link and the host buffers seconds
-     * worth of output; entering the raw REPL right away would time out
-     * because the banner only arrives after that backlog has drained.
-     * Quiet line = program stopped and backlog fully received.
+     * The interrupt is a burst of single Ctrl-C writes (see
+     * INTERRUPT_BURST_GAPS_MS: one packet delivers at most one
+     * KeyboardInterrupt over BLE, and a bare `except:` in the program
+     * swallows an interrupt landing inside it), preceded on BLE by the
+     * firmware level force-stop request. A tight print loop saturates the
+     * link and the host buffers seconds worth of output; entering the raw
+     * REPL right away would time out because the banner only arrives
+     * after that backlog has drained. Quiet line = program stopped (or
+     * never printing) and backlog fully received; whether the program
+     * really stopped is decided by the raw REPL probe in _enterRawRepl.
      * @param {number} maxWaitMs - upper bound for the drain.
      * @private
      */
-    async _interruptAndDrain (maxWaitMs = 8000) {
-        await this._writeRaw(Buffer.from('\r\x03\x03'));
+    async _interruptAndDrain (maxWaitMs = INTERRUPT_DRAIN_MAX_MS) {
         const start = Date.now();
+        if (this._sendsStopToken()) {
+            // Before the Ctrl-Cs: firmware without token support echoes
+            // it into the friendly REPL line buffer, and the following
+            // Ctrl-C clears that line again.
+            await this._writeRaw(Buffer.from(STOP_TOKEN, 'latin1'));
+        }
+        for (const gap of this._interruptGapsMs) {
+            this._throwIfAbortedOrDropped();
+            await this._writeRaw(Buffer.from('\x03'));
+            await wait(gap);
+        }
         let lastTotal = this._rxTotal;
         let quietPolls = 0;
-        let resent = false;
+        let lastResend = Date.now();
         while (Date.now() - start < maxWaitMs && quietPolls < 3) {
             // React to a user abort within one poll instead of sitting
             // out the whole drain window.
-            if (this._uploading && this._abort) {
-                throw new Error('Aborted');
-            }
+            this._throwIfAbortedOrDropped();
             await wait(100);
             if (this._rxTotal === lastTotal) {
                 quietPolls++;
@@ -1238,13 +1371,72 @@ class MicroPythonBlePeripheral {
             }
             quietPolls = 0;
             lastTotal = this._rxTotal;
-            // Still streaming after 2s: the interrupt may have drowned in
-            // the flood, ask once more (harmless at an idle REPL).
-            if (!resent && Date.now() - start > 2000) {
-                resent = true;
+            // Still streaming: the interrupts may have drowned in the
+            // flood, ask again now and then (harmless at an idle REPL).
+            if (Date.now() - lastResend >= INTERRUPT_RESEND_INTERVAL) {
+                lastResend = Date.now();
                 await this._writeRaw(Buffer.from('\x03'));
             }
         }
+    }
+
+    /**
+     * Stop whatever runs on the board and land in the raw REPL. Success
+     * is decided by the raw REPL banner, never by a quiet line alone: a
+     * program that swallows KeyboardInterrupt in a bare `except:` keeps
+     * running silently, and Ctrl-A is just another queued byte to it.
+     * Each round is idempotent for a board that already stopped (Ctrl-A
+     * at a raw prompt reprints the banner, Ctrl-C at any prompt clears
+     * the line), so rounds simply repeat until the banner shows up or
+     * the budget is spent; then the transport's force-stop fallback gets
+     * one chance before giving up.
+     * @return {Promise} - resolved at the raw REPL prompt.
+     * @throws {Error} code 'INTERRUPT_FAILED' when the program could not
+     *   be stopped; 'Aborted' / 'Connection lost' propagate unchanged.
+     * @private
+     */
+    async _enterRawRepl () {
+        const deadline = Date.now() + RAW_REPL_ENTRY_BUDGET_MS;
+        for (let round = 0; round < RAW_REPL_ENTRY_ROUNDS; round++) {
+            this._replBuffer = '';
+            await this._interruptAndDrain(Math.max(300, Math.min(INTERRUPT_DRAIN_MAX_MS, deadline - Date.now())));
+            this._replBuffer = '';
+            await this._writeRaw(Buffer.from('\r\x01'));
+            // The last probe waits the full response timeout: a board
+            // that did stop may still be draining a long backlog.
+            const remaining = deadline - Date.now();
+            const lastRound = round === RAW_REPL_ENTRY_ROUNDS - 1 ||
+                remaining < 2 * this._rawReplProbeTimeoutMs;
+            try {
+                await this._waitFor('raw REPL; CTRL-B to exit',
+                    lastRound ? REPL_RESPONSE_TIMEOUT : this._rawReplProbeTimeoutMs);
+                // Also consume the trailing "\r\n>" prompt. Over fast
+                // transports (Web Serial) it may still be in flight when
+                // the next step clears the buffer, and would then poison
+                // positional reads like the raw-paste probe answer.
+                await this._waitFor('>', 1000);
+                return;
+            } catch (probeErr) {
+                if (!/^Timeout waiting/.test(probeErr.message)) throw probeErr;
+                if (lastRound) break;
+            }
+        }
+        if (await this._forceStopFallback()) return;
+        const err = new Error('The program running on the board could not be interrupted');
+        err.code = 'INTERRUPT_FAILED';
+        throw err;
+    }
+
+    /**
+     * Last resort after the interrupt rounds failed. The BLE transport
+     * has nothing beyond Ctrl-C and the firmware token; the Web Serial
+     * subclass overrides this with a DTR/RTS reset.
+     * @return {Promise<boolean>} - true when the board is at the raw REPL
+     *   prompt now.
+     * @private
+     */
+    _forceStopFallback () {
+        return Promise.resolve(false);
     }
 
     /**
@@ -1260,16 +1452,7 @@ class MicroPythonBlePeripheral {
         // reach the GUI console.
         this._replCaptureDepth++;
         try {
-            this._replBuffer = '';
-            await this._interruptAndDrain();
-            this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x01'));
-            await this._waitFor('raw REPL; CTRL-B to exit');
-            // Also consume the trailing "\r\n>" prompt. Over fast transports
-            // (Web Serial) it may still be in flight when the next step
-            // clears the buffer, and would then poison positional reads
-            // like the raw-paste probe answer.
-            await this._waitFor('>');
+            await this._enterRawRepl();
             await this._probeBleMtu();
             await this._execRaw(LIVE_PROLOGUE);
             // The prologue killed any still-running push sampler (e.g.
@@ -1285,6 +1468,12 @@ class MicroPythonBlePeripheral {
             this._reportLiveAvailable();
         } catch (err) {
             this._liveReady = false;
+            if (err.code === 'INTERRUPT_FAILED') {
+                // Distinct reason: the channel is fine, the board is busy
+                // with a program that will not stop. The GUI turns this
+                // into an actionable hint (reset / upload an empty program).
+                this._reportLiveUnavailable('interrupt-failed');
+            }
             throw err;
         } finally {
             this._replCaptureDepth--;
@@ -1450,17 +1639,24 @@ class MicroPythonBlePeripheral {
      * from a dead channel. Only meaningful while the peripheral is
      * otherwise connected in realtime mode; a plain disconnect has its
      * own GUI state already.
+     * @param {string} reason - 'channel' (default) when the REPL session
+     *   is being rebuilt, 'interrupt-failed' when the program on the
+     *   board could not be stopped. A changed reason bypasses the
+     *   throttle so it is never hidden behind a not-ready emission.
      * @private
      */
-    _reportLiveUnavailable () {
+    _reportLiveUnavailable (reason = 'channel') {
         if (!this.isConnected() || this._uploading) return;
         if (!(this._runtime.isRealtimeMode && this._runtime.isRealtimeMode())) return;
         const time = Date.now();
-        if (time - this._lastLiveUnavailableEmit < LIVE_UNAVAILABLE_EMIT_THROTTLE) return;
+        if (reason === this._lastLiveUnavailableReason &&
+            time - this._lastLiveUnavailableEmit < LIVE_UNAVAILABLE_EMIT_THROTTLE) return;
         this._lastLiveUnavailableEmit = time;
+        this._lastLiveUnavailableReason = reason;
         this._liveUnavailableAnnounced = true;
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_UNAVAILABLE, {
-            deviceId: this._deviceId
+            deviceId: this._deviceId,
+            reason
         });
     }
 
@@ -1473,6 +1669,7 @@ class MicroPythonBlePeripheral {
         if (!this._liveUnavailableAnnounced) return;
         this._liveUnavailableAnnounced = false;
         this._lastLiveUnavailableEmit = 0;
+        this._lastLiveUnavailableReason = null;
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_AVAILABLE, {
             deviceId: this._deviceId
         });
@@ -2244,9 +2441,14 @@ class MicroPythonBlePeripheral {
             this._ble.expectDisconnect();
         }
         try {
-            // Interrupt anything running, leave a possible raw REPL, then
+            // Stop a running program first (separate writes: over BLE the
+            // bytes behind a Ctrl-C in the same packet stay unread until
+            // the next write, so the reset line would never be executed
+            // while a program runs), leave a possible raw REPL, then
             // request the reset. The GATT link may drop mid-write.
-            await this._writeRaw(Buffer.from('\r\x03\x03\x02'));
+            await this._interruptAndDrain(1500);
+            await this._writeRaw(Buffer.from('\x02'));
+            await wait(50);
             await this._writeRaw(Buffer.from('import machine\r\nmachine.reset()\r\n'));
         } catch (e) {
             // The board rebooted before the write fully completed.
@@ -2288,13 +2490,7 @@ class MicroPythonBlePeripheral {
         try {
             this._sendstd('Entering raw REPL...\n');
             // Interrupt any running program, then enter raw REPL.
-            this._replBuffer = '';
-            await this._interruptAndDrain();
-            this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x01'));
-            await this._waitFor('raw REPL; CTRL-B to exit');
-            // Consume the trailing prompt, see _enterLiveMode.
-            await this._waitFor('>');
+            await this._enterRawRepl();
 
             await this._probeBleMtu();
 
@@ -2352,6 +2548,15 @@ class MicroPythonBlePeripheral {
                 this._writeRaw(Buffer.from('\x02')).catch(() => {});
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_UPLOAD_SUCCESS, true);
             } else {
+                if (err.code === 'INTERRUPT_FAILED') {
+                    // Actionable guidance next to the error banner: the
+                    // link is fine, the program on the board is what has
+                    // to go (a reset restarts it too, but the fresh
+                    // reconnect right after boot usually catches it
+                    // before its loop starts swallowing interrupts).
+                    this._sendstd('板上正在运行的程序无法被中断(可能在 try/except 里吞掉了停止信号)。\n');
+                    this._sendstd('请按一下板上的 RST/EN 键复位后立即重试上传;仍不行请刷新固件。\n');
+                }
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_UPLOAD_ERROR, {
                     message: err.message
                 });
@@ -2592,13 +2797,7 @@ class MicroPythonBlePeripheral {
         // not reach the GUI console and _waitFor only sees captured data.
         this._replCaptureDepth++;
         try {
-            this._replBuffer = '';
-            await this._interruptAndDrain();
-            this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x01'));
-            await this._waitFor('raw REPL; CTRL-B to exit');
-            // Consume the trailing prompt, see _enterLiveMode.
-            await this._waitFor('>');
+            await this._enterRawRepl();
             const output = await this._execRaw(command, timeout);
             await this._writeRaw(Buffer.from('\x02'));
             // Swallow the friendly REPL banner printed after CTRL-B.
@@ -2715,13 +2914,7 @@ class MicroPythonBlePeripheral {
         // Same capture rules as _runBoardFsCommand.
         this._replCaptureDepth++;
         try {
-            this._replBuffer = '';
-            await this._interruptAndDrain();
-            this._replBuffer = '';
-            await this._writeRaw(Buffer.from('\r\x01'));
-            await this._waitFor('raw REPL; CTRL-B to exit');
-            // Consume the trailing prompt, see _enterLiveMode.
-            await this._waitFor('>');
+            await this._enterRawRepl();
             await this._execRawPaste('import ubinascii');
             await this._writeFileRaw(path, data);
             await this._writeRaw(Buffer.from('\x02'));

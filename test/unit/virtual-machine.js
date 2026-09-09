@@ -1004,6 +1004,22 @@ test('Setting turbo mode emits events', t => {
     t.end();
 });
 
+test('live channel availability events are forwarded from the runtime with their payload', t => {
+    const vm = new VirtualMachine();
+    const seen = [];
+    vm.addListener('PERIPHERAL_LIVE_UNAVAILABLE', data => seen.push(['down', data]));
+    vm.addListener('PERIPHERAL_LIVE_AVAILABLE', data => seen.push(['up', data]));
+
+    vm.runtime.emit(Runtime.PERIPHERAL_LIVE_UNAVAILABLE, {deviceId: 'esp32', reason: 'interrupt-failed'});
+    vm.runtime.emit(Runtime.PERIPHERAL_LIVE_AVAILABLE, {deviceId: 'esp32'});
+
+    t.deepEqual(seen, [
+        ['down', {deviceId: 'esp32', reason: 'interrupt-failed'}],
+        ['up', {deviceId: 'esp32'}]
+    ]);
+    t.end();
+});
+
 test('Getting the renderer returns the renderer', t => {
     const renderer = new Renderer();
     const vm = new VirtualMachine();

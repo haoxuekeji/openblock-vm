@@ -35,6 +35,8 @@ const makeStalledPeripheral = () => {
     peripheral.isConnected = () => true;
     peripheral._liveWatchdogIntervalMs = 10;
     peripheral._liveWatchdogStallMs = 30;
+    // Short interrupt burst, the handshake timing is what matters here.
+    peripheral._interruptGapsMs = [5, 5, 5];
     const writes = [];
     peripheral._writeRaw = buffer => {
         const text = buffer.toString('latin1');

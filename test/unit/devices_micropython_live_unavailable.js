@@ -36,6 +36,7 @@ const makePeripheral = () => {
         makeRuntime(events), 'dev', 'dev', {register: false}
     );
     peripheral.isConnected = () => true;
+    peripheral._interruptGapsMs = [5, 5, 5];
     peripheral._writeRaw = buffer => {
         const text = buffer.toString('latin1');
         const reply = answer => peripheral._routeIncoming(Buffer.from(answer, 'latin1'));

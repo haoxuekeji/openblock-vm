@@ -6,6 +6,24 @@ const MicroPythonBlePeripheral = require('./micropython-ble-peripheral');
 // Boot time of the MicroPython firmware after a hard reset.
 const HARD_RESET_BOOT_TIME = 2500;
 
+// How long after a DTR/RTS reset the force-stop fallback keeps sending
+// Ctrl-C, and how often. The boot scripts run with the interrupt char
+// disabled (a Ctrl-C arriving then is a plain queued byte), main.py
+// re-enables it, so the first Ctrl-C landing after main.py started
+// stops it while it is still in its setup code, before the loop that
+// swallows interrupts is even reached. Covers slow boards.
+const FORCE_STOP_SPRAY_TIME = HARD_RESET_BOOT_TIME + 1500;
+const FORCE_STOP_SPRAY_INTERVAL = 50;
+
+// Espressif's native USB-Serial-JTAG (C3/S3 without a bridge chip): a
+// hard reset re-enumerates the USB device and the granted Web Serial port
+// object is dead afterwards, so the reset fallback must not be used.
+const ESPRESSIF_USB_VENDOR_ID = 0x303A;
+
+// Raw REPL entry probe over USB serial: near-zero RTT, so a banner that
+// has not shown up by then is not coming.
+const SERIAL_RAW_REPL_PROBE_TIMEOUT = 600;
+
 // After flashing with --erase-all the firmware boots for the first time
 // and has to create the whole filesystem; same wait as the Link uploader.
 const FIRMWARE_BOOT_TIME = 10 * 1000;
@@ -68,6 +86,10 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
         this._deviceOpt = options.deviceOpt || null;
         // Overridable so tests do not wait out the real boot time.
         this._firmwareBootMs = FIRMWARE_BOOT_TIME;
+        this._rawReplProbeTimeoutMs = SERIAL_RAW_REPL_PROBE_TIMEOUT;
+        // Force-stop fallback timing, instance copies for tests.
+        this._forceStopSprayMs = FORCE_STOP_SPRAY_TIME;
+        this._forceStopSprayIntervalMs = FORCE_STOP_SPRAY_INTERVAL;
         // The board push sampler exists to beat the BLE round trip
         // time; serial polling is already at the display rate with a
         // near-zero RTT, so the resident pump stays the refresh path
@@ -209,6 +231,50 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
             });
         }
         return true;
+    }
+
+    /**
+     * Last resort when Ctrl-C could not stop the program (every interrupt
+     * landed inside a bare `except:`): pulse DTR/RTS to reset the board,
+     * then spray single Ctrl-Cs through the boot window so the program is
+     * interrupted in its setup code right after main.py starts, before
+     * its loop swallows interrupts again, and probe the raw REPL once.
+     * Board state is lost (that is the point). Skipped on native USB
+     * chips whose port does not survive a reset, and while an upload is
+     * being aborted.
+     * @return {Promise<boolean>} - true when the board is at the raw REPL
+     *   prompt now.
+     * @private
+     */
+    async _forceStopFallback () {
+        if (!this._serial || !this.isConnected()) return false;
+        if (this._uploading && this._abort) return false;
+        const info = this._serial.getPortInfo ? this._serial.getPortInfo() : {};
+        if (info && info.usbVendorId === ESPRESSIF_USB_VENDOR_ID) return false;
+
+        // The board reboots: forget its pins/objects/caches. _liveReady is
+        // owned by the caller (_enterLiveMode holds it as its in-progress
+        // guard while this runs), so it must survive the reset.
+        const liveReady = this._liveReady;
+        this._resetLiveState();
+        this._liveReady = liveReady;
+        await this._serial.hardReset();
+        const sprayEnd = Date.now() + this._forceStopSprayMs;
+        while (Date.now() < sprayEnd) {
+            this._throwIfAbortedOrDropped();
+            await this._writeRaw(Buffer.from('\x03'));
+            await wait(this._forceStopSprayIntervalMs);
+        }
+        this._replBuffer = '';
+        await this._writeRaw(Buffer.from('\r\x01'));
+        try {
+            await this._waitFor('raw REPL; CTRL-B to exit', this._rawReplProbeTimeoutMs);
+            await this._waitFor('>', 1000);
+            return true;
+        } catch (err) {
+            if (!/^Timeout waiting/.test(err.message)) throw err;
+            return false;
+        }
     }
 
     /**
