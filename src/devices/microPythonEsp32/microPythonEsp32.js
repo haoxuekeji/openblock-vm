@@ -109,21 +109,30 @@ const pyStr = text => `'${String(text)
 
 /**
  * Python helper function measuring a HC-SR04 style ultrasonic sensor,
- * shared by the upload code generator and the realtime mode.
+ * shared by the upload code generator and the realtime mode (keep in sync
+ * with hxblock-blocks generators/python/esp32.js). time_pulse_us returns -2
+ * when the echo pulse never starts (sensor missing, miswired or unpowered)
+ * and -1 when it outlasts the timeout (nothing in range): report -1 and the
+ * 400 cm rated range respectively. The pull-down keeps a disconnected ECHO
+ * line from floating into random readings.
  * @readonly
  */
 const SR04_FUNC =
     'def _ob_sr04(trig, echo):\n' +
     '    import machine\n' +
     '    tp = Pin(trig, Pin.OUT)\n' +
-    '    ep = Pin(echo, Pin.IN)\n' +
+    '    ep = Pin(echo, Pin.IN, Pin.PULL_DOWN)\n' +
     '    tp.value(0)\n' +
     '    time.sleep_us(2)\n' +
     '    tp.value(1)\n' +
     '    time.sleep_us(10)\n' +
     '    tp.value(0)\n' +
     '    d = machine.time_pulse_us(ep, 1, 30000)\n' +
-    '    return round(d / 58.0, 1) if d > 0 else 0\n';
+    '    if d == -2:\n' +
+    '        return -1\n' +
+    '    if d < 0:\n' +
+    '        return 400\n' +
+    '    return min(400, round(d / 58.0, 1))\n';
 
 /**
  * OpenBlock blocks to interact with a MicroPython esp32 peripheral.
