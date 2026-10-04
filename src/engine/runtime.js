@@ -868,6 +868,17 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name for reporting that the board raised a python exception
+     * while running a realtime (live) block. The block itself carries on
+     * with null/0 as before; the data ({deviceId, message: board stderr})
+     * lets the GUI tell the user why nothing happened.
+     * @const {string}
+     */
+    static get PERIPHERAL_LIVE_ERROR () {
+        return 'PERIPHERAL_LIVE_ERROR';
+    }
+
+    /**
      * Event name for reporting that a peripheral realtime connection has been lost.
      * This causes a 'peripheral connection realtime lost' error alert to display.
      * @const {string}

@@ -176,6 +176,14 @@ const LIVE_WATCHDOG_STALL_TIME = 3000;
 const LIVE_UNAVAILABLE_EMIT_THROTTLE = 1000;
 
 /**
+ * Minimum spacing between two PERIPHERAL_LIVE_ERROR emissions carrying
+ * the same board error: a failing block inside a forever loop raises it
+ * on every round trip. A different error is reported right away.
+ * @readonly
+ */
+const LIVE_ERROR_EMIT_THROTTLE = 1000;
+
+/**
  * Live commands up to this many bytes go through the plain raw REPL:
  * a single direction change instead of the three the raw-paste
  * handshake needs, which matters a lot on high-latency links (each BLE
@@ -627,6 +635,14 @@ class MicroPythonBlePeripheral {
         this._lastLiveUnavailableEmit = 0;
         this._liveUnavailableAnnounced = false;
         this._lastLiveUnavailableReason = null;
+
+        /**
+         * Board error reporting throttle: the last PERIPHERAL_LIVE_ERROR
+         * message and when it was emitted.
+         * Field types in declaration order: ?string, number.
+         */
+        this._lastLiveErrorMessage = null;
+        this._lastLiveErrorEmit = 0;
 
         /**
          * Read requests collected for the next batched flush, in arrival
@@ -1523,7 +1539,11 @@ class MicroPythonBlePeripheral {
      * @param {object} options - execution options.
      * @param {boolean} options.isReadOnly - true when the command does not
      *   change any board state, keeping cached sensor readings valid.
-     * @return {Promise<string>} - stdout of the command, null when not ready.
+     * @param {boolean} options.quiet - true for internal commands whose
+     *   python errors are expected and handled (e.g. probing a firmware
+     *   feature); they are not reported to the GUI as block errors.
+     * @return {Promise<string>} - stdout of the command, null when not ready
+     *   or when the board raised an exception.
      */
     execLive (command, timeout = REPL_RESPONSE_TIMEOUT, options = {}) {
         if (!this.isReady()) {
@@ -1565,6 +1585,7 @@ class MicroPythonBlePeripheral {
                 // disagree now; resync or every following live command
                 // would fail too, looking like a dead board.
                 if (String(err && err.message).startsWith('Board error:')) {
+                    if (!options.quiet) this._reportLiveBoardError(err.message);
                     throw err;
                 }
                 // Resync and retry the command once, so a transient
@@ -1585,6 +1606,8 @@ class MicroPythonBlePeripheral {
                         // and leave a fresh session behind.
                         this._reportLiveUnavailable();
                         await this._recoverLiveSession();
+                    } else if (!options.quiet) {
+                        this._reportLiveBoardError(retryErr.message);
                     }
                     throw retryErr;
                 }
@@ -1672,6 +1695,28 @@ class MicroPythonBlePeripheral {
         this._lastLiveUnavailableReason = null;
         this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_AVAILABLE, {
             deviceId: this._deviceId
+        });
+    }
+
+    /**
+     * Tell the GUI (throttled per message) that the board raised a python
+     * exception while running a live block. Without this the block just
+     * did nothing (or read 0) and the reason only reached the dev console.
+     * @param {string} message - the "Board error: <stderr>" error message.
+     * @private
+     */
+    _reportLiveBoardError (message) {
+        if (!this.isConnected() || this._uploading) return;
+        if (!(this._runtime.isRealtimeMode && this._runtime.isRealtimeMode())) return;
+        const text = String(message).replace(/^Board error:\s*/, '');
+        const time = Date.now();
+        if (text === this._lastLiveErrorMessage &&
+            time - this._lastLiveErrorEmit < LIVE_ERROR_EMIT_THROTTLE) return;
+        this._lastLiveErrorMessage = text;
+        this._lastLiveErrorEmit = time;
+        this._runtime.emit(this._runtime.constructor.PERIPHERAL_LIVE_ERROR, {
+            deviceId: this._deviceId,
+            message: text
         });
     }
 
@@ -2208,7 +2253,7 @@ class MicroPythonBlePeripheral {
         const gen = ++this._livePushGen;
         const command = MicroPythonBlePeripheral.buildLivePushStartCommand(
             exprs, gen, LIVE_PUSH_INTERVAL);
-        this.execLive(command, REPL_RESPONSE_TIMEOUT, {isReadOnly: true}).then(output => {
+        this.execLive(command, REPL_RESPONSE_TIMEOUT, {isReadOnly: true, quiet: true}).then(output => {
             this._livePushStarting = false;
             // Superseded by a newer start/stop/reset meanwhile.
             if (gen !== this._livePushGen) return;
@@ -2246,7 +2291,7 @@ class MicroPythonBlePeripheral {
         this._livePushGen++;
         if (!wasRunning) return Promise.resolve(null);
         return this.execLive(MicroPythonBlePeripheral.buildLivePushStopCommand(),
-            REPL_RESPONSE_TIMEOUT, {isReadOnly: true});
+            REPL_RESPONSE_TIMEOUT, {isReadOnly: true, quiet: true});
     }
 
     /**

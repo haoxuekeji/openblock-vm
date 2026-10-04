@@ -175,6 +175,9 @@ class VirtualMachine extends EventEmitter {
         this.runtime.on(Runtime.PERIPHERAL_LIVE_AVAILABLE, data =>
             this.emit(Runtime.PERIPHERAL_LIVE_AVAILABLE, data)
         );
+        this.runtime.on(Runtime.PERIPHERAL_LIVE_ERROR, data =>
+            this.emit(Runtime.PERIPHERAL_LIVE_ERROR, data)
+        );
         this.runtime.on(Runtime.PERIPHERAL_SCAN_TIMEOUT, () =>
             this.emit(Runtime.PERIPHERAL_SCAN_TIMEOUT)
         );
