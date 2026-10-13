@@ -1157,6 +1157,19 @@ class WebBLE {
  *   (user explicitly rescans to switch boards). Web Bluetooth backend only.
  */
 class BLE {
+    /**
+     * Whether a requestDevice rejection means the user closed the chooser
+     * without picking anything (Chrome: NotFoundError "User cancelled the
+     * requestDevice() chooser"), as opposed to a real failure.
+     * @param {Error} e - the rejection.
+     * @return {boolean} - true for a user cancel.
+     */
+    static isChooserCancelled (e) {
+        if (!e) return false;
+        if (e.name === 'NotFoundError') return true;
+        return /cancel/i.test(String(e.message || ''));
+    }
+
     constructor (runtime, deviceId, peripheralOptions, connectCallback, resetCallback = null, options = {}) {
         this._runtime = runtime;
         this._deviceId = deviceId;
@@ -1211,6 +1224,13 @@ class BLE {
             .catch(e => {
                 if (this._webOnly) {
                     this._backend = null;
+                    if (BLE.isChooserCancelled(e)) {
+                        // The user closed the system chooser: an empty
+                        // "no devices found" list (refresh / change
+                        // method), not the error page.
+                        this._runtime.emit(this._runtime.constructor.PERIPHERAL_SCAN_TIMEOUT);
+                        return;
+                    }
                     this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
                         message: (e && e.message) || 'No Bluetooth device selected',
                         deviceId: this._deviceId

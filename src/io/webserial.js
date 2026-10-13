@@ -67,6 +67,19 @@ class WebSerial {
     }
 
     /**
+     * Whether a requestPort rejection means the user closed the chooser
+     * without picking anything (Chrome: NotFoundError "No port selected
+     * by the user"), as opposed to a real failure.
+     * @param {Error} e - the rejection.
+     * @return {boolean} - true for a user cancel.
+     */
+    static isChooserCancelled (e) {
+        if (!e) return false;
+        if (e.name === 'NotFoundError') return true;
+        return /no port selected|cancel/i.test(String(e.message || ''));
+    }
+
+    /**
      * Find the serial port to use. Chooser-free when exactly one port the
      * user granted earlier (navigator.serial.getPorts: permission persists
      * per origin, only attached ports are listed) matches the device's

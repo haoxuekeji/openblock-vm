@@ -132,6 +132,13 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
         );
         this._serial.requestPeripheral(listAll, {forceChooser: options && options.forceChooser === true})
             .catch(e => {
+                if (WebSerial.isChooserCancelled(e)) {
+                    // Closing the system chooser is not a failure: show the
+                    // empty "no devices found" list (refresh / change method)
+                    // instead of the error page.
+                    this._runtime.emit(this._runtime.constructor.PERIPHERAL_SCAN_TIMEOUT);
+                    return;
+                }
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
                     message: (e && e.message) || 'No serial port selected',
                     deviceId: this._deviceId

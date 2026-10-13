@@ -159,3 +159,12 @@ test('getPorts unavailable or failing -> chooser', async t => {
     t.equal(chooserOpened, 2, 'getPorts error: chooser');
     t.end();
 });
+
+test('closing the chooser is a user cancel, not a failure', t => {
+    const notFound = Object.assign(new Error('No port selected by the user.'), {name: 'NotFoundError'});
+    t.ok(WebSerial.isChooserCancelled(notFound));
+    t.ok(WebSerial.isChooserCancelled(new Error('User cancelled the chooser')));
+    t.notOk(WebSerial.isChooserCancelled(new Error('Failed to open serial port')));
+    t.notOk(WebSerial.isChooserCancelled(null));
+    t.end();
+});
