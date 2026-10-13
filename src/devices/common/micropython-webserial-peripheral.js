@@ -30,7 +30,12 @@ const FIRMWARE_BOOT_TIME = 10 * 1000;
 
 // Transfer baud rate once the esptool flasher stub runs; the ROM sync
 // itself always happens at 115200 (esptool-js romBaudrate default).
-const ESPTOOL_FLASH_BAUD = 921600;
+// Transfer baud rates tried in order. CH340 adapters (the usual ESP32 dev
+// board USB chip) often cannot sustain 921600 through Web Serial: the
+// stub answers once, then esptool-js reports "Serial data stream stopped"
+// right after the baud switch. Each failure re-syncs at the next rate;
+// the last entry equals the ROM baud, so no switch happens at all.
+const ESPTOOL_FLASH_BAUDS = [921600, 460800, 230400, 115200];
 
 // Where the MicroPython image starts: the classic esp32 bootloader lives
 // at 0x1000, newer chips (c3/s3/c6) are flashed from 0x0. Fallback for
@@ -404,58 +409,87 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
      */
     async _flashWithEsptool (port, firmware) {
         const {ESPLoader, Transport} = await this._loadEsptool();
-        const transport = new Transport(port, false);
         const terminal = {
             clean: () => {},
             write: data => this._sendstd(String(data)),
             writeLine: data => this._sendstd(`${String(data)}\n`)
         };
-        try {
-            const loader = new ESPLoader({
-                transport,
-                baudrate: ESPTOOL_FLASH_BAUD,
-                terminal
-            });
+        const expectedChip = String((this._deviceOpt && this._deviceOpt.chip) || 'esp32');
+        const flashAddress = (this._deviceOpt && this._deviceOpt.flashAddress) ||
+            CHIP_FLASH_ADDRESS[expectedChip] || '0x0';
+        const address = parseInt(flashAddress, 16) || 0;
 
-            this._sendstd('Connecting to the chip (esptool-js)...\n');
-            await loader.main();
+        for (let attempt = 0; attempt < ESPTOOL_FLASH_BAUDS.length; attempt++) {
+            const baudrate = ESPTOOL_FLASH_BAUDS[attempt];
+            const transport = new Transport(port, false);
+            try {
+                const loader = new ESPLoader({
+                    transport,
+                    baudrate,
+                    terminal
+                });
 
-            const expectedChip = String((this._deviceOpt && this._deviceOpt.chip) || 'esp32');
-            const detectedChip = loader.chip && loader.chip.CHIP_NAME ? String(loader.chip.CHIP_NAME) : '';
-            if (!MicroPythonWebSerialPeripheral.chipMatches(expectedChip, detectedChip)) {
-                throw new Error(`The connected chip is ${detectedChip || 'unknown'}, ` +
-                    `but this device expects ${expectedChip}. Flashing aborted.`);
-            }
+                this._sendstd(`Connecting to the chip (esptool-js, ${baudrate} baud)...\n`);
+                await loader.main();
 
-            const flashAddress = (this._deviceOpt && this._deviceOpt.flashAddress) ||
-                CHIP_FLASH_ADDRESS[expectedChip] || '0x0';
-            const address = parseInt(flashAddress, 16) || 0;
-            this._sendstd(`Erasing flash and writing firmware at ${flashAddress}...\n`);
-            let lastPercent = -1;
-            await loader.writeFlash({
-                fileArray: [{data: firmware, address}],
-                // "keep" preserves the flash parameters already encoded in
-                // the image header, matching the esptool CLI defaults the
-                // Link uploader relies on.
-                flashMode: 'keep',
-                flashFreq: 'keep',
-                flashSize: 'keep',
-                eraseAll: true,
-                compress: true,
-                reportProgress: (fileIndex, written, total) => {
-                    const percent = Math.round(written / total * 100);
-                    if (percent !== lastPercent) {
-                        lastPercent = percent;
-                        this._sendstd(`Writing firmware ${percent}%\n`);
-                    }
+                const detectedChip = loader.chip && loader.chip.CHIP_NAME ? String(loader.chip.CHIP_NAME) : '';
+                if (!MicroPythonWebSerialPeripheral.chipMatches(expectedChip, detectedChip)) {
+                    throw Object.assign(new Error(`The connected chip is ${detectedChip || 'unknown'}, ` +
+                        `but this device expects ${expectedChip}. Flashing aborted.`), {noRetry: true});
                 }
-            });
-            this._sendstd('Flash firmware Success.\n');
-            await loader.after('hard_reset');
-        } finally {
-            // Closes the port so reclaimPort can reopen it for the REPL.
-            await transport.disconnect().catch(() => null);
+
+                this._sendstd(`Erasing flash and writing firmware at ${flashAddress}...\n`);
+                let lastPercent = -1;
+                await loader.writeFlash({
+                    fileArray: [{data: firmware, address}],
+                    // "keep" preserves the flash parameters already encoded in
+                    // the image header, matching the esptool CLI defaults the
+                    // Link uploader relies on.
+                    flashMode: 'keep',
+                    flashFreq: 'keep',
+                    flashSize: 'keep',
+                    eraseAll: true,
+                    compress: true,
+                    reportProgress: (fileIndex, written, total) => {
+                        const percent = Math.round(written / total * 100);
+                        if (percent !== lastPercent) {
+                            lastPercent = percent;
+                            this._sendstd(`Writing firmware ${percent}%\n`);
+                        }
+                    }
+                });
+                this._sendstd('Flash firmware Success.\n');
+                await loader.after('hard_reset');
+                return;
+            } catch (e) {
+                const lastAttempt = attempt === ESPTOOL_FLASH_BAUDS.length - 1;
+                const noRetry = Boolean(e && e.noRetry);
+                if (noRetry || this._abort || lastAttempt ||
+                    !MicroPythonWebSerialPeripheral.isRetryableFlashError(e)) {
+                    throw e;
+                }
+                this._sendstd(`${(e && e.message) || e}\n`);
+                this._sendstd(`Retrying at ${ESPTOOL_FLASH_BAUDS[attempt + 1]} baud...\n`);
+                await wait(300);
+            } finally {
+                // Closes the port so the next attempt (or reclaimPort) can
+                // reopen it.
+                await transport.disconnect().catch(() => null);
+            }
         }
+    }
+
+    /**
+     * Whether an esptool-js failure is worth retrying at a lower transfer
+     * baud: serial stream / timeout / flash-id verification errors after
+     * the baud switch. Chip mismatches and aborts are not.
+     * @param {Error} e - the failure.
+     * @return {boolean} - true to retry slower.
+     */
+    static isRetryableFlashError (e) {
+        const message = String((e && e.message) || e || '');
+        return /serial data stream stopped|noise|corruption|timeout|timed out|flash chip connection/i.test(message) ||
+            /invalid head of packet|failed to connect|response doesn't match/i.test(message);
     }
 
     /**
