@@ -684,6 +684,10 @@ class WebBLE {
         };
         if (fromMemory) {
             peripheralInfo.rememberedDevice = true;
+        } else {
+            // The user just picked this device in the system chooser:
+            // asking for a second click on the tile is redundant.
+            peripheralInfo.autoConnect = true;
         }
         this._availablePeripherals[device.id] = peripheralInfo;
 

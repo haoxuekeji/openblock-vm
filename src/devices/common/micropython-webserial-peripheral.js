@@ -102,8 +102,10 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
      * Opens the browser serial port chooser.
      * @param {Array.<string>} pnpidList - the pnp id list from the device, like 'USB\\VID_1A86&PID_7523'.
      * @param {boolean} listAll - whether to show every serial port.
+     * @param {object} options - {forceChooser}: the user explicitly wants to
+     *   pick a port (refresh), skip the silent granted-port reuse.
      */
-    scan (pnpidList, listAll = false) {
+    scan (pnpidList, listAll = false, options = {}) {
         if (!pnpidList || pnpidList.length === 0) {
             pnpidList = this._pnpidList;
         }
@@ -128,7 +130,7 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
             this.reset,
             this._onSerialData.bind(this)
         );
-        this._serial.requestPeripheral(listAll)
+        this._serial.requestPeripheral(listAll, {forceChooser: options && options.forceChooser === true})
             .catch(e => {
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_REQUEST_ERROR, {
                     message: (e && e.message) || 'No serial port selected',

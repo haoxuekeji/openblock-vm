@@ -679,8 +679,9 @@ class MicroPythonBlePeripheral {
      * @param {boolean} listAll - the GUI rescan flag; a user explicitly
      *   refreshing the list wants to pick a (different) device, so the
      *   chooser is forced instead of the silent remembered-device path.
+     * @param {object} options - {forceChooser}: same intent, explicit.
      */
-    scan (pnpidList, listAll = false) {
+    scan (pnpidList, listAll = false, options = {}) {
         if (this._ble) {
             // Replacing an old scan/connection object is internal cleanup, not
             // a user-visible disconnect. Emitting PERIPHERAL_DISCONNECTED here
@@ -698,7 +699,7 @@ class MicroPythonBlePeripheral {
         }, this._onConnect, this.reset, {
             webOnly: this._webBluetoothOnly,
             onUnexpectedDisconnect: this._handleConnectionDrop,
-            forceChooser: listAll === true
+            forceChooser: listAll === true || (options && options.forceChooser === true)
         });
     }
 

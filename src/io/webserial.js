@@ -6,6 +6,14 @@
  * requestPeripheral / connectPeripheral / disconnect / isConnected / write,
  * incoming data is delivered through the onData callback.
  */
+
+/**
+ * Device ids whose silently reused granted port failed to open in this
+ * page session; they fall back to the chooser until a connect succeeds.
+ * @type {object}
+ */
+const autoConnectBlocked = {};
+
 class WebSerial {
     /**
      * Construct a WebSerial transport.
@@ -59,29 +67,100 @@ class WebSerial {
     }
 
     /**
-     * Open the browser serial port chooser.
+     * Find the serial port to use. Chooser-free when exactly one port the
+     * user granted earlier (navigator.serial.getPorts: permission persists
+     * per origin, only attached ports are listed) matches the device's
+     * USB filters: that is the board plugged in right now, picking it
+     * again in the system dialog is a wasted click. Otherwise, or when
+     * the caller insists (refresh / "show all"), the chooser opens.
+     *
+     * Either way the port is published as the only entry of the
+     * peripheral list, flagged so the GUI connects without a tile click:
+     * `autoConnect` after the chooser (the user just picked it) and
+     * `rememberedDevice` on the silent path (the GUI applies its
+     * once-per-page guard so a user who wants a different board is not
+     * trapped in an auto reconnect loop).
      * @param {boolean} listAll - when true, do not filter by USB vid/pid.
-     * @return {Promise} - resolved after the user picked a port.
+     * @param {object} options - {forceChooser}: skip the granted-port path.
+     * @return {Promise} - resolved after a port was published.
      */
-    requestPeripheral (listAll = false) {
-        const requestOptions = {};
-        if (!listAll && this._options.filters && this._options.filters.length > 0) {
-            requestOptions.filters = this._options.filters;
+    requestPeripheral (listAll = false, options = {}) {
+        const filters = (!listAll && this._options.filters && this._options.filters.length > 0) ?
+            this._options.filters : null;
+        const silent = !options.forceChooser && !listAll &&
+            !autoConnectBlocked[this._deviceId];
+        const granted = silent ? this._findGrantedPort(filters) : Promise.resolve(null);
+        return granted.then(port => {
+            if (port) {
+                this._publishPort(port, {rememberedDevice: true});
+                return;
+            }
+            const requestOptions = {};
+            if (filters) requestOptions.filters = filters;
+            return navigator.serial.requestPort(requestOptions)
+                .then(picked => this._publishPort(picked, {autoConnect: true}));
+        });
+    }
+
+    /**
+     * The single granted + attached port matching the filters, or null
+     * (none, several, API missing or lookup error -> chooser).
+     * @param {?Array.<object>} filters - [{usbVendorId, usbProductId}] or null.
+     * @return {Promise<?SerialPort>} - the port to reuse or null.
+     * @private
+     */
+    _findGrantedPort (filters) {
+        if (typeof navigator === 'undefined' || !navigator.serial ||
+            typeof navigator.serial.getPorts !== 'function') {
+            return Promise.resolve(null);
         }
-        return navigator.serial.requestPort(requestOptions)
-            .then(port => {
-                this._port = port;
-                // There is no stable id in Web Serial, use a fixed one, the
-                // GUI connects to whatever the user picked in the chooser.
-                const peripheralInfo = {
-                    peripheralId: 'web-serial',
-                    name: WebSerial._portName(port)
-                };
-                this._runtime.emit(
-                    this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
-                    {'web-serial': peripheralInfo}
-                );
-            });
+        return navigator.serial.getPorts()
+            .then(ports => {
+                const matching = (ports || []).filter(port => WebSerial._matchesFilters(port, filters));
+                return matching.length === 1 ? matching[0] : null;
+            })
+            .catch(() => null);
+    }
+
+    /**
+     * Whether a port's USB ids satisfy one of the Web Serial filters.
+     * @param {SerialPort} port - the granted port.
+     * @param {?Array.<object>} filters - [{usbVendorId, usbProductId}] or null = any.
+     * @return {boolean} - true when the port may be reused.
+     * @private
+     */
+    static _matchesFilters (port, filters) {
+        if (!filters || filters.length === 0) return true;
+        let info = {};
+        try {
+            info = port.getInfo() || {};
+        } catch (e) {
+            return false;
+        }
+        return filters.some(filter =>
+            (typeof filter.usbVendorId === 'undefined' || filter.usbVendorId === info.usbVendorId) &&
+            (typeof filter.usbProductId === 'undefined' || filter.usbProductId === info.usbProductId)
+        );
+    }
+
+    /**
+     * Adopt a port and publish it as the peripheral list.
+     * @param {SerialPort} port - the port to use.
+     * @param {object} flags - extra peripheral flags for the GUI.
+     * @private
+     */
+    _publishPort (port, flags) {
+        this._port = port;
+        // There is no stable id in Web Serial, use a fixed one, the GUI
+        // connects to whatever was picked / found.
+        const peripheralInfo = Object.assign({
+            peripheralId: 'web-serial',
+            name: WebSerial._portName(port)
+        }, flags);
+        this._runtime.emit(
+            this._runtime.constructor.PERIPHERAL_LIST_UPDATE,
+            {'web-serial': peripheralInfo}
+        );
     }
 
     /**
@@ -96,12 +175,17 @@ class WebSerial {
             .then(() => {
                 this._writer = this._port.writable.getWriter();
                 this._connected = true;
+                delete autoConnectBlocked[this._deviceId];
                 navigator.serial.addEventListener('disconnect', this._handleHardwareDisconnect);
                 this._readLoopPromise = this._readLoop();
                 this._runtime.emit(this._runtime.constructor.PERIPHERAL_CONNECTED);
                 if (this._connectCallback) this._connectCallback();
             })
             .catch(e => {
+                // A granted port that will not open (busy in another tab /
+                // program, stale handle): stop reusing it silently for the
+                // rest of the page session so the next scan shows the chooser.
+                autoConnectBlocked[this._deviceId] = true;
                 this._handleRequestError(e);
             });
     }

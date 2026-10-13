@@ -119,8 +119,8 @@ class MicroPythonMultiTransportPeripheral {
         return this._peripheral[method](...args);
     }
 
-    scan (pnpidList, listAll) {
-        return this._call('scan', [pnpidList, listAll]);
+    scan (pnpidList, listAll, options) {
+        return this._call('scan', [pnpidList, listAll, options]);
     }
 
     connect (id, baudrate) {
