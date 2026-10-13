@@ -345,7 +345,9 @@ class MicroPythonWebSerialPeripheral extends MicroPythonBlePeripheral {
         try {
             const firmwareUrl = this._deviceOpt.webFirmware;
             this._sendstd(`Downloading firmware ${firmwareUrl}...\n`);
-            const response = await fetch(firmwareUrl);
+            // The static tree is served with a 30-day cache; revalidate so a
+            // rebuilt image is picked up instead of the copy flashed last time.
+            const response = await fetch(firmwareUrl, {cache: 'no-cache'});
             if (!response.ok) {
                 throw new Error(`Could not download the firmware image (HTTP ${response.status})`);
             }
